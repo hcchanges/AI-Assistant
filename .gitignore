@@ -1,0 +1,48 @@
+# ===== 虚拟环境与缓存（不入库）=====
+.venv/
+__pycache__/
+*.pyc
+
+# ===== data/：保留 .py 源码，只忽略运行期数据 =====
+data/__pycache__/
+data/*.db
+data/*.sqlite
+data/*.sqlite3
+data/pomodoro_state.json
+# 抓屏笔记的"上次问过没有"（v2-notes-cadence）：跟番茄钟那份同性子的运行期状态，
+# 也是本机节奏数据，不入库
+data/notes_state.json
+# 卡内小助手的会话记录（v2-card-tools-A）：一张卡一个文件，是用户自己跟它聊的话，
+# 跟抓屏笔记一样属于本机内容，不入库
+data/card_chat/
+# 卡上那些小部件（v2-card-tools-B）：一张卡一个文件，记的是用户自己让卡上长出来的
+# 东西和它们勾成什么样，跟卡窗记录同性子，也不入库
+data/card_tools/
+# 卡面摆成什么样（v2-card-tools-C）：一张卡一个文件，记的是用户自己把卡上几块东西
+# 拖成的次序，跟卡窗记录 / 卡上部件同性子，也不入库
+data/card_layout/
+data/chroma/
+data/logs/
+data/models/
+# v2-data-root：data_dir 没配置时，运行期数据退回项目内 data/ 下的新子目录布局
+# （db / vector / cache）；配置了 data_dir 则整个都在项目外，这几行只兜住 fallback。
+data/db/
+data/vector/
+data/cache/
+
+# ===== 情感记忆加密库（S1）：主库被上面的 data/*.db 盖住了，
+# 但 SQLite 的旁挂文件（-wal / -shm / -journal）不匹配 *.db，得单独列 =====
+data/mind.db-wal
+data/mind.db-shm
+data/mind.db-journal
+
+# ===== 抓屏笔记（C 多模态）：用户自己的笔记，不入库 =====
+data/notes/
+
+# ===== 探针 / 预览等临时产物 =====
+_*预览*.png
+
+# ===== 密钥 / 本地配置（勿入库）=====
+.env
+*.key
+config.local.yaml

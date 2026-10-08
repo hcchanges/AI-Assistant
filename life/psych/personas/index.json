@@ -1,0 +1,34 @@
+{
+  "module": "life.psych",
+  "description": "心理安抚模块 · 角色卡索引。运行时按 id 加载对应卡，叠加‘性格’层并注入用户记忆。",
+  "personas": [
+    {
+      "id": "metaphysics_master",
+      "name": "玄机先生",
+      "role_type": "metaphysics",
+      "file": "metaphysics_master.json",
+      "desc": "从命理玄学框架安抚（娱乐/陪伴属性）"
+    },
+    {
+      "id": "counselor_lin",
+      "name": "林医生",
+      "role_type": "counselor",
+      "file": "counselor_lin.json",
+      "desc": "从心理医学角度安抚（含危机安全SOP）"
+    },
+    {
+      "id": "tour_guide",
+      "name": "导游·老周",
+      "role_type": "guide",
+      "file": "tour_guide.json",
+      "desc": "出行卡的专业角色：跑了十几年的老导游，管行程、季节、落地安排"
+    },
+    {
+      "id": "nutrition_chef",
+      "name": "营养主厨·姜师傅",
+      "role_type": "nutrition",
+      "file": "nutrition_chef.json",
+      "desc": "饮食卡的专业角色：注册营养师 + 五星酒店主厨，一段话里兼讲搭配与做法"
+    }
+  ]
+}

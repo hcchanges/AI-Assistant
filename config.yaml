@@ -1,0 +1,295 @@
+app:
+  name: 电子宠物
+  autostart: false
+  log_level: INFO
+  log_dir: logs
+  # 运行期数据（db / 向量库 / 缓存 / 日志）的落点。留空 = 放在本项目的 data/ 下，
+  # 想放别处就写绝对路径。公开版留空，本地那份配置里的路径不随仓发布。
+  data_dir: ''
+llm:
+  active: deepseek
+  temperature: 0.9
+  providers:
+    deepseek:
+      protocol: openai_compatible
+      base_url: https://api.deepseek.com/v1
+      model: deepseek-chat
+      api_key_ref: llm_deepseek
+    tongyi:
+      protocol: openai_compatible
+      base_url: https://dashscope.aliyuncs.com/compatible-mode/v1
+      model: qwen-plus
+      api_key_ref: llm_dashscope
+pet:
+  name: 团子
+  persona: 傲娇
+  persona_prompt: ''
+  user_call: ''
+  style_actions: true
+  style_kaomoji: false
+  position:
+  - 1403
+  - 859
+  hover_hint: true
+  hover_hint_sec: 0.5
+memory:
+  db_path: db/pet.db
+  vector_path: vector
+  model_path: models/bge-small-zh-v1.5
+  top_k: 5
+mind:
+  # 情感记忆库（S1~S5）：独立加密库，跟 pet.db 完全隔离。
+  # 密钥不在这个文件里——走环境变量 PET_MIND_KEY 或系统凭据管理器。
+  enabled: true
+  db_path: db/mind.db
+  idle_end_min: 3          # 停这么久没再说话，就算这一轮聊完了，可以提炼
+  reunion_days: 3          # 多久没聊算「久别重逢」
+  followup_days: 2         # 关键事件隔多久可以跟进问一句
+  proactive_enabled: true  # 关掉就只记不主动开口
+  # A++ 本地优先：本机 data/models/ 里放着量化模型（qwen2.5-0.5b/1.5b 之类）就
+  # 在本地跑提炼，对话原文不出本机；没有模型就自动回落 API，行为跟以前一样。
+  # 显式设成 false = 强制走 API（哪怕本机其实有模型）。
+  local_model: true
+  # 本地模型权重的落点。已在 .gitignore 里，仓库不带任何权重文件。
+  local_model_dir: data/models
+  # 私密称呼（B+ 挚友档）：处到最亲近那一档，它才会用这个叫你。留空 = 没给过，
+  # 语气退回「最亲近」那档，不硬凑一个叫法出来。
+  intimate_nickname: ''
+schedule:
+  quiet_hours:
+  - '23:00'
+  - 07:30
+  max_notify_per_hour: 3
+pomodoro:
+  focus_min: 25
+  short_break_min: 5
+  long_break_min: 15
+  long_break_every: 4
+  mute_other_reminders: true
+  notify_sound: true
+activity:
+  enabled: true
+  sample_sec: 3
+  idle_min: 5
+  retention_days: 14
+  blacklist: []
+  sedentary_min: 30
+  sedentary_repeat_min: 30
+  distract_switches: 14
+  distract_window_sec: 60
+  distract_cooldown_min: 5
+  remind: false
+vision:
+  provider: tongyi
+  model: qwen-vl-max
+  sample_sec: 5
+  change_threshold: 15.0
+  min_gap_sec: 45
+  max_width: 1024
+voice:
+  # 语音总闸（C 多模态）。关掉就整条线纯文字。
+  enabled: true
+  # ---- 听（ASR）----
+  asr_enabled: true        # 听的总闸；关掉就只剩打字
+  asr_local: true          # 本机 whisper 就在本地认；显式设 false = 强制走 API
+  # 本机 whisper 权重的落点：ggml（whisper.cpp 的 .bin/.gguf）或 CTranslate2 目录都行。
+  # 目录里同时放着本地小模型的 gguf 不会串——两边各自认各自的后缀 / 文件名。
+  # 已在 .gitignore 里，仓库不带任何权重文件。
+  asr_local_model_dir: data/models
+  asr_provider: ''         # 走 API 时用哪个供应商；留空 = 用 llm.active 那个
+  asr_model: whisper-1     # 走 API 时的识别模型名
+  # 全局快捷键：按一下开始、再按一下结束。不是按住说话——按住得挂系统级键盘钩子，
+  # 那就成了常驻监听整个键盘，碰红线。留空 = 不用快捷键，只走浮窗那个按钮。
+  asr_hotkey: Ctrl+Alt+Space
+  asr_max_sec: 15          # 一次最多录多久，防着忘了松手
+work:
+  provider: tongyi
+  top_n: 5
+  pet_comment: false
+  role: admin
+card:
+  categories:
+    餐饮:
+    - 外卖
+    - 油腻
+    - 奶茶
+    - 做饭
+    - 体重
+    - 泡面
+    - 夜宵
+    穿搭:
+    - 穿搭
+    - 搭配
+    - 衣服
+    - 换季
+    - 买衣服
+    出行:
+    - 地铁
+    - 公交
+    - 打车
+    - 堵车
+    - 排队
+    - 迟到
+    - 通勤
+    - 挤
+    - 见客户
+    - 机场
+    - 飞机
+    - 高铁
+    - 火车
+    - 车站
+    - 航班
+    - 出差
+    健身:
+    - 健身
+    - 跑步
+    - 锻炼
+    - 运动
+    - 健身房
+    情感:
+    - 朋友
+    - 家人
+    - 对象
+    - 吵架
+    - 想念
+    - 冷战
+    作息:
+    - 加班
+    - 熬夜
+    - 失眠
+    - 早会
+    - 困
+    - 作息
+    - 睡不好
+    消费:
+    - 花钱
+    - 剁手
+    - 买单
+    - 超支
+    - 预算
+    - 省钱
+    娱乐:
+    - 游戏
+    - 追剧
+    - 刷手机
+    - 刷视频
+    - 无聊
+    - 看剧
+    命理:
+    - 算命
+    - 运势
+    - 生辰
+    - 八字
+    - 卦
+    - 太岁
+    - 犯冲
+    - 克我
+    - 风水
+    - 塔罗
+    - 占卜
+    - 命理
+    - 生肖
+    - 星座
+    - 黄历
+    - 姻缘
+    - 合婚
+    - 择日
+    - 桃花
+  classify_confidence: 0.7
+  invite_global_days: 3
+  decline_silence_days: 7
+  archive_idle_days: 14
+life_cards:
+  profile_tools_enabled: true
+screen:
+  enabled: true
+  ocr_enabled: true
+  sample_sec: 5
+  scene_stable_samples: 2
+  scene_cooldown_min: 10
+  focus_enabled: true
+  focus_minutes: 25
+  read_browser_title: true
+  # ---- 画面情绪（CV 腿，S1~S7）----
+  # 三档：off 完全不判 / local 本机离线判（默认）/ cloud 把这一帧发给多模态服务商。
+  # local 会在 data/models/ 下加载中文 CLIP 的 ONNX 量化版（约 132MB，已 gitignore，
+  # 仓库不带权重），想回到「一点模型都不碰」就设成 off，行为与加这层之前逐字相同。
+  mood: local
+  # 传屏授权：**默认关，关着的时候一个字节都不发**。只有 mood 是 cloud 且它也是 true
+  # 才会真往外发；设置页「陪玩」那页切到云端档时会把要传什么、传给谁写在旁边。
+  mood_cloud: false
+  # 本地档判到多少分才肯报场景。0.70 是量出来的：真节庆照片 0.99，合成噪声最高 0.66。
+  mood_min_score: 0.7
+intent:
+  work_words:
+  - BOM
+  - 方案
+  - 优化
+  - 卖点
+  - 交付
+  - 汇报
+  - 报告
+  - 评审
+  - 排产
+  - 出货
+  - 成本核算
+  - 核价
+  - 打样
+  - 工单
+  - 项目
+  - 需求
+  action_words:
+  - 要做完
+  - 要交
+  - 得赶
+  - 得交
+  - 赶出来
+  - 今天要
+  - 明天要
+  - 截止
+  - 做完
+  - 交出去
+  - 交付
+  - 赶时间
+  - 赶工
+  - 要赶
+  - deadline
+  help_words:
+  - 怎么办
+  - 来不及
+  - 快要
+  - 快迟到
+  - 要迟到
+  - 赶不上
+  - 帮我
+  - 帮我想想
+  - 快没时间
+  - 急
+  - 撑不住
+  - 赶时间
+  - 赶着
+  - 赶去
+  remind_words:
+  - 提醒我
+  - 提醒一下
+  - 提醒
+  - 叫我
+  - 喊我
+  - 定闹钟
+  - 设个闹钟
+  - 闹钟
+  - 别忘
+  - 记着
+  urgent_words:
+  - 来不及
+  - 迟到
+  - 迟了
+  - 赶不上
+  - 没时间
+  - 马上要
+  - 十万火急
+  - 救命
+  - 急死
+  - 赶时间
+  - 赶着
+  - 赶去

@@ -1,0 +1,16 @@
+# 电子宠物 MVP（P0~P6）依赖清单
+# 对应技术方案第 16 节附录；langchain-community 仍暂缓，cryptography 已按 S1 启用
+
+PySide6>=6.9          # 桌面外壳：透明/置顶/无边框窗口、托盘、动画
+langchain>=1.4        # AI 编排
+langchain-openai>=1.6 # OpenAI 兼容协议模型（DeepSeek/通义等）
+chromadb>=1.5         # 本地向量库（长期语义记忆）
+SQLAlchemy>=2.0       # ORM
+APScheduler>=3.11     # 定时调度
+PyYAML>=6.0           # 配置加载
+keyring>=25.0         # 密钥存入 Windows 凭据管理器，不落明文
+psutil>=7.0           # 前台应用监控：进程号 → 进程名（指令 5/6）
+openpyxl>=3.1         # 读 Excel 表格（.xlsx / .xlsm）
+rapidocr-onnxruntime>=1.4  # 屏幕感知（S2）：字幕识别，本地跑、不联网
+onnxruntime>=1.30     # rapidocr 的推理后端（它自带依赖，这里写出来是提醒别删）
+cryptography>=42      # 情感记忆加密库（S1）：SQLite 落盘逐字段 AES(Fernet)
