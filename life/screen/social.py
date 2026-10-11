@@ -172,8 +172,10 @@ NO_PEER_LINE_HINT = "我还没读到对方说了什么，稍等。"
 
 # ---- 自动监听（v2-social-auto） ----
 # 社交软件在前台时，每这么久轻量扫一眼"画面变没变"（只比指纹，不 OCR）；变了才认字。
-# 1.5 秒对聊天节奏绰绰有余，又足够"对方回消息刹那"就接上，不抢、不刷屏。
-LISTEN_POLL_MS = 1500
+# 0.5 秒（v2-social-offer-fast-latency：原 1500）：用户从会话总列表点进某个人的单聊，
+# "画面变了"这件事最迟要等一拍才被发现；指纹只是毫秒级的 8×8 哈希、抓帧也只是拷内存，
+# 代价低，就把这一格压细——1.5 秒那一格是"切回单聊后干等"里可省掉的一块。
+LISTEN_POLL_MS = 500
 # 判"这一下是用户自己刚发的"的空闲阈值（秒）：最近这么点时间里有键盘/鼠标动作，
 # 多半是用户在敲、在发，而不是对方回了新消息。
 #
@@ -198,6 +200,13 @@ SOCIAL_DONE_COOLDOWN_S = 20.0
 # 这个阈值是"还当他在想"与"别再等了"之间的那条线：比 `SEND_IDLE_S`（2.5 秒）与
 # 两道冷却（8 / 20 秒）都长得多，又不至于把气泡上那排按钮留到用户早忘了它。
 OFFER_HANG_S = 90.0
+# 冒话冷却那本账最多记多少格（v2-social-cooldown-per-window）。
+#
+# 正常用起来远到不了：一格 = 聊过的一个人，而 `_prune_asked` 每写一次都会顺手清掉"冷却
+# 早跑完"的那些格（30 分钟一过它们就没用了）。这一条是**兜底上限**——防的是
+# `_session_id` 被同一个窗口截出各种长度、或被某些异常路径灌进无穷多不同的键，把一本
+# 用不着多大的字典撑成内存泄漏。超了就把**最旧**的那些格丢掉。
+_ASKED_MAX_WINDOWS = 64
 # 点过 [好呀] 之后、那一问还挂着等对方那句时，自己看前台的间隔（毫秒，v2-social-on-demand-snap）。
 #
 # 真机 2026-10-08 20:09:47–20:10:28 那一段：用户点 [好呀] 那一刻前台是宠物自己
@@ -207,8 +216,9 @@ OFFER_HANG_S = 90.0
 # 外加每一趟 OCR 2.2~5.2 秒。这条腿把前面那 5 秒压掉：挂住期间每 500 毫秒自己看一眼，
 # 社交窗一回来立刻抓一屏（OCR 那 2~5 秒省不掉，它是真在认字）。
 #
-# 500 不是随手取的：比 `LISTEN_POLL_MS`（1500）细，切换回来那一瞬不至于漏掉半秒以上；
-# 又不至于把空闲的抓屏（`_grab_chat` 在非社交前台当场 return None，几乎不耗）堆起来。
+# 500 不是随手取的：跟 `LISTEN_POLL_MS`（v2-social-offer-fast-latency 起也是 500）同级，
+# 切换回来那一瞬不至于漏掉半秒以上；又不至于把空闲的抓屏（`_grab_chat` 在非社交前台
+# 当场 return None，几乎不耗）堆起来。
 PENDING_SNAP_MS = 500
 # 自动监听这一拍直接起草时的"用户话"那一格：他没开口，这里给一个固定的处境说明。
 AUTO_TRIGGER_TEXT = "对方刚回了消息，帮我拟一段回过去的话"
@@ -312,6 +322,88 @@ def _is_chat_chrome(text: object) -> bool:
     return bool(_CHAT_TIME_LINE.fullmatch(body))
 
 
+# 「这一屏还在加载」的占位文案（v2-social-list-leak-fix）。
+#
+# 真机 2026-10-11 09:23:06 坐实的漏法：登录后打开「公众号」（微信主窗、窄版），那一屏
+# 内容还在加载，聊天区里认出来**只有一个「正在加载」**（日志：`社交窗口认到 4 个字
+# （对方 6 行 / 自己 0 行）`）。这一屏把 `classify_chat_page` 的每条判据**全躲过去了**：
+#   · `looks_like_list_page` 的时间腿要 5 条纯时间行——0 条；
+#   · 列表字面腿要 2 类——0 类；
+#   · 几何那条腿（`looks_like_list_boxes`）要 6 个右对齐短框——加载屏没有那一列；
+#   · 表头那几行（`PAGE_HEAD_ROWS`）的固定页名一个都不在。
+# 于是它落到底部的 `return PAGE_PERSONAL`，被当成"跟某人一对一"→ `note_page_kind` 当
+# 「非单聊 → 单聊」跃迁冒了 offer；用户点了 [好呀] 之后，这屏的字又被当了材料（Bug X）。
+# 那一戳还把这一场（`_cooldown_key()`）永久记进 `_helping`（无 TTL），之后切回真正的
+# 个人单聊被 `_ask_offer` 开局的 `_is_helping()` 静默挡下（Bug Y）。
+#
+# 这是"默认放行"兜底（口径 ①，认不出按单聊办）在"**还没有内容**"这一种屏上的必然副作用：
+# 它跟"只收对方话的单聊"在字面上长得太像（都自己 0 行、都没时间戳、都没列表签名）。
+#
+# 判据跟这一路的老态度一致（用户拍板过："按已知文本特征过滤，不靠颜色猜"）：**整屏认出来
+# 的字里，去掉装潢之后剩下的每一行都是加载占位**，且**一行 `SENDER_USER` 都没有**（绿
+# 气泡是"这是聊天窗"的硬证据，跟 `looks_like_list_page` 同一条口径）。
+#
+# **三条有意不做的**：
+#   1. **空屏（一个字没认到）不算**——那是"没认到"，按口径 ① 默认放行，不在这儿拦
+#      （`classify_chat_page(ChatRead())` 仍回 `PAGE_PERSONAL`，既有用例钉着这一条）；
+#   2. **要"每一行都是"，不要"有一行是"**——判错的代价不对称：漏判只是照旧冒一句（跟加
+#      这一手之前逐字相同），误判会把一场**真单聊**挡死（不冒话、不进材料）。拿不准就往
+#      "漏判"那边压（跟 `looks_like_list_boxes` 同一个取舍）；
+#   3. **不碰像素 / 颜色 / 时钟**——同 `looks_like_list_page` 的态度。
+_CHAT_LOADING_LINES = (
+    "正在加载",
+    "正在加载中",
+    "加载中",
+    "正在进入",
+    "请稍候",
+)
+# 比之前先把空白抹平、再把尾巴上的省略号 / 标点削掉：OCR 偶尔吐成「加载中...」/「加载中…」。
+_CHAT_LOADING_FOLDED = frozenset("".join(p.split()) for p in _CHAT_LOADING_LINES)
+_CHAT_LOADING_TAIL = ".。…·、,，"
+
+
+def _is_loading_line(text: object) -> bool:
+    """这一行是不是**加载占位**（`正在加载` / `加载中` 这类，不是谁说的话）。
+
+    只认**整行**等于那几句（空白先抹平、尾巴省略号先削掉），夹着别的内容的行不认——
+    真有人发来一句「加载中别急」，那是人话，宁可留着。
+    """
+    body = "".join(tidy_line(text).split())
+    body = body.rstrip(_CHAT_LOADING_TAIL)
+    return bool(body) and body in _CHAT_LOADING_FOLDED
+
+
+def _loading_bodies(bodies) -> bool:
+    """一串（`tidy_line` 之后的）行**是不是"整屏都还在加载"**：去掉装潢与空行之后，
+    至少剩一行、且剩下的**每一行**都是加载占位。空（一个字都没有）回 False——那是
+    "没认到"，见 `classify_chat_page` 的默认放行口径。"""
+    real = [body for body in bodies if body and not _is_chat_chrome(body)]
+    return bool(real) and all(_is_loading_line(body) for body in real)
+
+
+def looks_like_loading_page(read: object) -> bool:
+    """这一屏认出来的字**是不是"还在加载"的占位屏**（不是一场单聊）。
+
+    命中就是"这一拍不是 active 的 1:1 聊天视图"（跟 `looks_like_list_page` 同一个契约）：
+    既不冒 offer、也不进材料。**自己那半边只要出现过一行 `SENDER_USER` 就直接 False**
+    ——绿气泡是"这是聊天窗"的硬证据，加载屏上一个都没有。
+    """
+    chat = as_chat_read(read)
+    if any(sender == SENDER_USER for sender, _text in chat.lines):
+        return False
+    return _loading_bodies([tidy_line(text) for _sender, text in chat.lines])
+
+
+def _looks_like_loading_material(text: object) -> bool:
+    """一段材料**整段都是加载占位**（`_ask_offer` 那道双保险要用的）。
+
+    跟 `looks_like_loading_page` 同一套判据，只是喂进来的是已经取好的材料
+    （`self._chat_text`，一行一条）而不是整份 `ChatRead`。空材料回 False（"没认到"
+    是另一种情形，不在这儿拦）。
+    """
+    return _loading_bodies(tidy_lines(text))
+
+
 # **会话总列表**在**文本这一层**长什么样（v2-social-listview-leak-fix 16-β）。
 #
 # 真机 2026-10-08 12:32:59 那一帧坐实的漏法：整页就是会话总列表，OCR 读出 37 行，
@@ -386,7 +478,7 @@ def looks_like_list_page(read: object) -> bool:
     （`core.bootstrap._read_social_chat`）：不 `_tail_context`、不 `_auto_generate`，
     列表里那些昵称 / 预览行一个都不进材料；**自动与手动两条路共用这一份空 read**。
 
-    **判据是"时间戳密度"与"列表专有字面"两条腿，任一条成立就算**：
+    **判据是"时间戳密度"、"列表专有字面"、"加载占位屏"三条腿，任一条成立就算**：
 
     一、整行就是一个时间的行数 ≥ `LIST_PAGE_TIME_ROWS`（5）。**绝对数、不是比例**——
     比例那条专门不取：一场只说了几句话的单聊，两三条时间戳除以十来行就是高比例，
@@ -396,6 +488,12 @@ def looks_like_list_page(read: object) -> bool:
     这一条管的是"时间列压根没读出来"的帧（窄版单页把每行读成"昵称行 + 预览行"，一条
     纯时间行都没有），上面那条腿对它们完全是瞎的。两类是**种类**不是行数，理由与真机
     读数见 `LIST_PAGE_MARK_KINDS` 那段。
+
+    三、**整屏都是"还在加载"的占位**（`looks_like_loading_page`，v2-social-list-leak-fix）：
+    上面两条腿对"内容还没出来"的屏是全瞎的——0 条纯时间行、0 类列表字面、自己也没发过话，
+    于是它一路落到 `classify_chat_page` 兜底的 `PAGE_PERSONAL`。这一条专治那种屏（真机
+    2026-10-11 09:23:06 的「正在加载」）；它要求**每一行都是占位**，比前两条更保守，
+    所以摆在**最后**判。
 
     **没取「行内含时间标记」那一维**（本来考虑过）：真机上它跟第一条腿几乎**逐帧相同**——
     47 帧里只有 9 帧不一样（142749 的 0→1，其余 8 帧都是 12→13），多出来的那一条**全是夹在
@@ -419,7 +517,74 @@ def looks_like_list_page(read: object) -> bool:
         return True
     # 时间戳密度那条腿瞎了（时间列没读出来）时，看列表行才有的字面：账号号 / 未读计数 /
     # 群名行，凑够两类就算（v2-social-listview-leak-fix-judge）。
-    return _list_mark_kinds(bodies) >= LIST_PAGE_MARK_KINDS
+    if _list_mark_kinds(bodies) >= LIST_PAGE_MARK_KINDS:
+        return True
+    # 第三条腿（v2-social-list-leak-fix）：**还在加载的占位屏**（整屏只有「正在加载」这类
+    # 字、无一真话）。它跟上面两条腿一样"不是 active 的 1:1 聊天视图"，而上面两条对它是
+    # 全瞎的（0 时间行、0 列表字面）——见 `looks_like_loading_page` 那一段。放在**最后**
+    # 判：它比前两条更保守（要求"整屏都是占位"），前两条能定的就定，别绕远。
+    return looks_like_loading_page(chat)
+
+
+# ---- 列表页免全文 OCR：**只跑检测**的廉价先验（v2-social-offer-fast-latency）----
+#
+# 病根（只读报告 v2-social-offer-latency-trace + 真机 2026-10-09 那批帧）：用户切进
+# 微信那一拍，前台若是**会话总列表**，`_read_social_screen` / `_poll_listen` 照旧整趟
+# 跑识别（实测中位 2.7 秒），可列表页既不该冒 offer、也不进材料——那份字白认。而它
+# 还**卡着下一拍**：识别期间 `_chat_reading` 立着，用户正好点进某个人的单聊，"画面变了"
+# 要等这趟回来 + 下一拍轮询 + 第二次识别，"十来秒才冒话"里最大的一块可消除延迟就在这儿。
+#
+# 上面 `looks_like_list_page` 判得准，但它吃的是**认出来的字**——OCR 之后才有。要做成
+# "认字之前"的闸，只能退到**字框几何**：会话总列表每行右边都有一个**右对齐的时间列**，
+# 于是有一批"右边缘贴着窗右边框、本身又是短框"的框；单聊里自己的绿气泡右边永远跟着
+# **头像**（离右边框还有一大截），时间戳又是**居中**的——两条都进不了这条带子。
+#
+# 真机读数（那批 11 张 `%TEMP%/pet_social_leak_*.png`，按生产路径 `chat_area_box` 裁完、
+# 在裁剪帧上只跑检测，`%TEMP%/p20/probe_det3.py`）：
+#   · 6 张会话总列表帧：命中 11 / 16 / 16 / 16 / 15 / 14
+#   · 4 张 1:1 单聊帧：0 / 0 / 0 / 0
+#   · 1 张混合调试帧（上微信下单聊 + 下终端，非生产帧）：1
+# 阈值取 6，落在 1 与 11 正中，两侧余量都大。
+#
+# **判错的代价不对称，所以阈值往"漏判"那边压**：漏判只是照旧认一遍字（跟加这一手之前
+# 逐字相同、零回归）；误判会把一场真单聊当列表、offer 与自动监听都不冒。宁可少省一次
+# 识别，也不许把功能挡掉一拍。这一条**不改 6aab8da 的语义**：命中时走的仍是 16-β 那条
+# "清成空 read"，只是把"判列表"从认字之后挪到了认字之前，页型同样记 `PAGE_LIST`。
+LIST_TIME_BAND_PX = 40      # "右对齐"：右边缘距窗右边框多少 px 以内算贴边
+LIST_TIME_MAX_W_PX = 200    # 时间列那种**短框**：比这宽的是整行文字，不算（终端满行就靠它挡掉）
+LIST_TIME_ROWS_MIN = 6      # 凑够几个这样的框才算列表
+
+
+def looks_like_list_boxes(boxes, width: int) -> bool:
+    """**只拿字框几何**判"这一屏像不像会话总列表"（v2-social-offer-fast-latency）。
+
+    给 `OcrReader.detect_boxes` 那趟**只检测**的结果用：命中就整趟省掉识别。`boxes` 是
+    原图坐标的四点多边形（`[[x, y], ...]`，RapidOCR 检测那一环的原始形状），`width` 是
+    这一帧的像素宽。
+
+    判据：右边缘距右边框 `LIST_TIME_BAND_PX` 以内、且本身宽度不超 `LIST_TIME_MAX_W_PX`
+    的框，凑够 `LIST_TIME_ROWS_MIN` 个。**形状对不上 / 空表 / 宽度为 0 一律回 False**——
+    判不出来就当没命中，照旧去认字。
+
+    **只看几何、不看字、不碰颜色、不读钟**：这一条的活儿就是在"认字之前"给一个先验。
+    """
+    if not boxes or width <= 0:
+        return False
+    hits = 0
+    for box in boxes:
+        try:
+            xs = [float(point[0]) for point in box]
+        except Exception:      # noqa: BLE001 —— 形状对不上不算命中，别把这条线带崩
+            continue
+        if not xs:
+            continue
+        right = max(xs)
+        left = min(xs)
+        if (width - right) <= LIST_TIME_BAND_PX and (right - left) <= LIST_TIME_MAX_W_PX:
+            hits += 1
+            if hits >= LIST_TIME_ROWS_MIN:
+                return True
+    return False
 
 
 # ---------- 「这一屏是哪一种页」：仅单聊触发帮聊（v2-social-trigger-window-gate）----------
@@ -461,9 +626,10 @@ PAGE_LIST = "list"                # 会话总列表 / 搜索页这类非 active 
 PAGE_CHANNEL = "channel"          # 订阅号 / 服务号 / 公众号
 PAGE_FILEHELPER = "filehelper"    # 文件传输助手
 PAGE_MINI = "mini"                # 小程序
+PAGE_LOGIN = "login"              # 登录 / 未登录那一屏（中间就一个「进入微信」大按钮）
 
 # 排除名单：命中任一种就不是单聊——offer 不冒、自动监听也不起草。
-NON_PERSONAL_PAGES = (PAGE_GROUP, PAGE_LIST, PAGE_CHANNEL, PAGE_FILEHELPER, PAGE_MINI)
+NON_PERSONAL_PAGES = (PAGE_GROUP, PAGE_LIST, PAGE_CHANNEL, PAGE_FILEHELPER, PAGE_MINI, PAGE_LOGIN)
 
 # 表头那一带的行数（含窗上那三个按钮 / 搜索框那种装潢）：口径 ② 说的"只看头几行"。
 PAGE_HEAD_ROWS = 4
@@ -482,17 +648,69 @@ GROUP_NOTICE_LINE = "群公告"
 _FILE_HELPER_NAMES = ("文件传输助手",)
 _CHANNEL_NAMES = ("订阅号", "服务号", "公众号")
 _MINI_NAMES = ("小程序",)
+# 登录 / 未登录那一屏的固定名，分两档（v2-social-login-page-fix）：
+# ① 多字名——**对表头拼接串做子串判断**（见 `classify_chat_page`）。真机 2026-10-10
+#    21:35:23 那帧是二维码登录屏，认到的是「扫码登录」；而「进入微信」这种按钮字 OCR
+#    也可能拆成「进入」+「微信」两框，逐行相等就双双落空。把表头几行拼起来再找子串，
+#    拆行、连写都能命中。「扫码登录」与「扫一扫登录」是两种写法，都收。
+# ② 二字短名「登录」——**留在逐行相等那一档**（`_fixed_page_name`）。它若也做子串，
+#    会把「登录后记得改密码」这种人话误判成登录页（test_social_dup_ocr_login.py 已守卫）。
+# ③ 登录页提示句（v2-social-login-hint-fix）：二维码登录屏上那句「需在手机上完成登录」
+#    不在上面四个按钮名里，老口径漏掉它 → 落到默认 personal → offer / 自动拟都冒在没
+#    登录时（真机 22:30:26）。「完成登录」这一族子串都收进来；正常聊天几乎不出现、
+#    而且只在表头那几行里找，子串安全。
+_LOGIN_SUBSTR_NAMES = ("进入微信", "扫码登录", "扫一扫登录", "切换账号", "需在手机上完成登录", "完成登录")
+_LOGIN_EXACT_NAMES = ("登录",)
 
 
 def _fixed_page_name(body: str) -> str:
-    """这一行是不是某个"页名"（文件传输助手 / 订阅号 / 小程序 …）。是就回那一种页。"""
+    """这一行是不是某个"页名"（文件传输助手 / 订阅号 / 小程序 / 登录页 …）。是就回那一种页。"""
     if body in _FILE_HELPER_NAMES:
         return PAGE_FILEHELPER
     if body in _CHANNEL_NAMES:
         return PAGE_CHANNEL
     if body in _MINI_NAMES:
         return PAGE_MINI
+    if body in _LOGIN_EXACT_NAMES:
+        return PAGE_LOGIN
     return ""
+
+
+# 账号选择 / 进入微信那一页的底栏字（v2-social-account-pick-page-leak-fix）。
+#
+# 真机 2026-10-11 10:24-10:25 坐实的漏法（`data/logs/pet.log` + 取证帧）：登录后停在
+# 「账号选择 / 进入微信」那一页（头像 / 昵称 + 绿色「进入微信」按钮 + 底部「切换账号」/
+# 「仅传输文件」），还没进聊天。这一页跟「还没登录」的二维码页是**两种页**——二维码页
+# 中间就一个「进入微信」大按钮，已被 `_LOGIN_SUBSTR_NAMES` 那条表头子串腿挡着；这一页
+# 上面多了头像 / 昵称那几行，把「进入微信」顶出表头 `PAGE_HEAD_ROWS`（4 行）之外，而
+# 「切换账号」「仅传输文件」又长在整页**最底部**——那条腿只扫 `head`，三句全够不着，
+# 于是落到兜底的 `return PAGE_PERSONAL` 被当成"跟某人一对一"：冒 offer、读占位内容。
+#
+# 判据跟这一路的老态度一致（只看字、不猜颜色）：**整屏拼起来**含「进入微信」，且同屏还含
+# 「切换账号」/「仅传输文件」任一，且**没有任何聊天内容**（没有自己发过话的绿气泡、也没有
+# 时间行 / 系统提示那类装潢）。三条都要——前两条是这一页独有的底栏组合，正常聊天几乎不会
+# 同时出现；第三条拿"绿气泡 + 时间行"两道硬证据兜底，宁可漏判（照旧冒一句，跟加这一手
+# 之前一样）不误判（把一场真单聊挡死）。
+_ACCOUNT_PICK_ENTER = "进入微信"
+_ACCOUNT_PICK_MARKS = ("切换账号", "仅传输文件")
+
+
+def looks_like_account_pick_page(read) -> bool:
+    """这一屏是不是「账号选择 / 进入微信」那一页（不是一场单聊）。
+
+    命中就是"这一拍不是 active 的 1:1 聊天视图"（跟 `looks_like_list_page` /
+    `looks_like_loading_page` 同一个契约）：既不冒 offer、也不进材料。**自己那半边只要
+    出现过一行 `SENDER_USER` 就直接 False**——绿气泡是"这是聊天窗"的硬证据。
+    """
+    chat = as_chat_read(read)
+    if any(sender == SENDER_USER for sender, _text in chat.lines):
+        return False
+    bodies = [tidy_line(text) for _sender, text in chat.lines]
+    if any(body and _is_chat_chrome(body) for body in bodies):
+        return False
+    # 空白全抹平再拼（OCR 可能把「进入 微信」拆开 / 夹空格），拆行、连写、夹空都命中。
+    joined = "".join("".join(body.split()) for body in bodies)
+    return _ACCOUNT_PICK_ENTER in joined and any(mark in joined for mark in _ACCOUNT_PICK_MARKS)
 
 
 def classify_chat_page(read) -> str:
@@ -514,11 +732,22 @@ def classify_chat_page(read) -> str:
         kind = _fixed_page_name(body)
         if kind:
             return kind
+    # 登录页多字名（v2-social-login-page-fix）：对表头拼接串做子串判断，拆行、连写都能
+    # 命中——OCR 把「进入微信」拆成两框时，单看每一行都拼不出完整按钮名，放不进
+    # `_fixed_page_name` 那张逐行相等的表里。「登录」那种二字短名不走这儿（见上）。
+    if any(name in "".join(head) for name in _LOGIN_SUBSTR_NAMES):
+        return PAGE_LOGIN
     if any(len(body) <= GROUP_HEAD_MAX_CHARS and _GROUP_HEAD_COUNT.search(body)
            for body in head):
         return PAGE_GROUP
     if any(body == GROUP_NOTICE_LINE for body in bodies):
         return PAGE_GROUP
+    # 账号选择 / 进入微信那一页（v2-social-account-pick-page-leak-fix）：整屏「进入微信」+
+    # 「切换账号」/「仅传输文件」、且没有任何聊天内容。`_LOGIN_SUBSTR_NAMES` 那条只扫表头
+    # 四行，够不着被头像 / 昵称顶下去的「进入微信」与长在页底的底栏（见
+    # `looks_like_account_pick_page`）。只在兜底**之前**加这一条，兜底本身一个字没动。
+    if looks_like_account_pick_page(chat):
+        return PAGE_LOGIN
     return PAGE_PERSONAL
 
 
@@ -777,6 +1006,39 @@ def is_social_proc(proc: str | None, overrides: dict[str, str] | None = None) ->
     return resolve_category(proc.lower(), overrides or {}) == SOCIAL_CATEGORY
 
 
+# 真正支持的工具白名单（v2-social-grab-whitelist）：只有前台是**这里列着的**进程，社交
+# 那条线才触发、才抓屏、才冒候选。名单外的窗口（ima、浏览器、IDE、别的聊天软件…）
+# 一律不触发、不抓屏、不生成候选。
+#
+# **为什么单立一份、不复用分类表**：`is_social_proc` 答的是"分类表说它算不算社交"
+# ——那份表用户能在设置里改，表里还躺着 QQ / Telegram / Discord 一串。可"抓屏、量聊天
+# 区、按气泡色分谁说的"（`social_window` 那一套）全是照**微信**版面做的：拿同一把尺去
+# 量别的窗口，量出来的是一屏杂字，真机上就是这么把别的窗口的字当"对方原话"冒出来的。
+# 所以"敢不敢拿这把尺去量"，得有一份**自己说了算**的名单，不能跟着分类表走。
+#
+# 眼下只有微信——桌面版两个 exe 名（4.x 是 `Weixin.exe`，老版是 `WeChat.exe`），两个
+# 都算"微信这一项"。将来要多支持一个工具：**往这个集合里加一条**，再补上它自己的
+# crop / classify（`social_window` 里那几张量尺）——名单只管"允不允许动它"，
+# 认不认得出聊天区是量尺的事。**判断一律走 `in` 这个集合，别写成 `== "Weixin.exe"`**，
+# 不然多支持一个工具就得回来改一堆地方。
+SOCIAL_ALLOWED_PROCS = {"weixin.exe", "wechat.exe"}
+
+
+def is_allowed_social_proc(proc: str | None) -> bool:
+    """前台这个进程是不是我们**真正支持**的社交工具（`SOCIAL_ALLOWED_PROCS`）。
+
+    跟 `is_social_proc` 是两层，别混：那个答"**分类表**说它算不算社交"（用户可覆盖，
+    含 QQ / Telegram / Discord 一串），这个答"**我们敢不敢拿微信那把尺去量它**"。
+    触发（`on_foreground`）、抓屏（装配层那道闸）、冒候选三处认的都是**这一个**。
+
+    进程名取不到（空串）也算"不在名单里"：认不出是谁，就当不支持——宁可这一拍不采，
+    也别把最前面那个**不知道是什么**的窗口当成聊天窗采下来。
+    """
+    if not proc:
+        return False
+    return proc.strip().lower() in SOCIAL_ALLOWED_PROCS
+
+
 class SocialReplyService(QObject):
     """社交软件前台时冒一句，用户在聊天里要草稿就写一段给他。**只提议、不代发。**"""
 
@@ -792,6 +1054,7 @@ class SocialReplyService(QObject):
         offline_candidates_provider: Callable[[], dict | None] | None = None,
         card_exists: Callable[[], bool] | None = None,
         session_provider: Callable[[], str] | None = None,
+        peer_provider: Callable[[], str] | None = None,
         idle_seconds: Callable[[], float] | None = None,
         offer_visible: Callable[[], bool] | None = None,
         parent: QObject | None = None,
@@ -825,6 +1088,11 @@ class SocialReplyService(QObject):
         # 见 `bootstrap._social_session_id`。不接（测试 / 关掉那条线）就整条降级成
         # "认不出换人"，行为跟加它之前逐字相同。
         self._session_provider = session_provider
+        # 「这一场对着谁」（v2-social-cooldown-by-peer）：冷却 / 帮聊那本账按"会话标识 +
+        # 对象名"分格。来源跟 `_session_provider` 是**同一个窗口标题**，装配层只把"这是
+        # 应用名"那一类滤成空串（见 `bootstrap._social_peer_id`）。不接（测试 / 关掉那条线）
+        # 就整条降级成"认不出对象名"，`_cooldown_key()` 逐字回到裸会话标识——**老行为**。
+        self._peer_provider = peer_provider
         # 「那排 [好呀] [不用了] 这会儿还挂在气泡上吗」——**由装配层注入的一问**
         # （v2-social-await-prime-fix 改动一）。它问的是界面那边的实况（气泡当前排的
         # 按钮主题是不是社交这一条），不是本服务记的状态。不接（测试 / 没装界面）
@@ -833,6 +1101,9 @@ class SocialReplyService(QObject):
         self._offer_visible = offer_visible
         # 上一拍认到的"这一场是谁"。取不到时留空串——空串一律当"认不出"，不动状态。
         self._session_id = ""
+        # 上一拍认到的"这一场对着的是谁"（v2-social-cooldown-by-peer）：只喂 `_cooldown_key()`，
+        # 不进材料、不进日志（日志那边只记 `len()`）。取不到留空串 = 退回裸会话标识。
+        self._peer_name = ""
         # **只存内存**：本场从聊天窗认出来的字（对方最近那条在里面）。生成时用掉即清，
         # 不落盘、不进任何库（v2-social-fewshot 的范围钉在这几行）。
         self._chat_text = ""
@@ -846,6 +1117,12 @@ class SocialReplyService(QObject):
         # 这一屏是哪一种页（v2-social-trigger-window-gate）：装配层每认一次字就报一次
         # （`note_page_kind`）。**只在"非单聊 → 单聊"跃迁那一拍冒邀请**；连着停在单聊上
         # 不重复问。走出社交前台清回空串，下一趟进来重新算一次跃迁。
+        #
+        # 这一格是**事实**：装配层报什么就记什么（"这一屏现在到底是哪一种页"），
+        # `in_personal_chat` 那条只读口径（v2-social-card-timeout 拿它判"还是不是原来那条
+        # 单聊"）读的就是它。它同时还是**跃迁锚点**（`note_page_kind` 拿它比"这一屏变了
+        # 没有"）——所以才有一条额外的口径：**没冒成的那一拍把它退回空串**，别把这次跃迁
+        # 白白消费掉（见 `note_page_kind` 的说明，v2-social-due-sentinel）。
         self._page_kind = ""
         # 最近一次前台切到的是哪个进程：`social_offer` 那一声带的就是它（只为日志）。
         self._last_proc = ""
@@ -856,8 +1133,37 @@ class SocialReplyService(QObject):
         # 这一拍抓不成时，这一问**挂住等切回来**（不再当场硬抓一屏空的）。挂过
         # `OFFER_HANG_S` 当过期（见 `_drain_pending`）——跟邀请那排按钮同一个寿命口径。
         self._pending_draft_at = 0.0
-        # 只存内存：上次在社交软件前台冒话是什么时候、有没有一段草稿正在生成
-        self._last_asked = 0.0
+        # 只存内存：**每一场**上次在社交软件前台冒话是什么时候（v2-social-cooldown-per-window）。
+        #
+        # 原来这一格是**一个标量**（`_last_asked: float | None`），于是那道 30 分钟冷却是
+        # **跨应用、跨人共用**的：跟甲聊过、冒过一句，这半小时里切到乙那边一句都不冒了
+        # （真机 21:28:06 / 21:38:24 / 22:28:41 那几条「冷却挡下」就是这么来的）。现在按
+        # **这一场是谁**分格记：换个人、换扇窗就是新的一格，头一次照旧不受冷却约束。
+        #
+        # **值是 `None` 的语义一个字没改**（v2-social-due-sentinel）：`None` / 没这一格 =
+        # "这一场从没冒过"。`_clock` 是 `time.monotonic()`，在 Windows 上就是
+        # `GetTickCount64()`——**开机以来的秒数**；拿 `0.0` 当"从没冒过"的哨兵，等于说
+        # "进程刚起 0 秒那会儿冒过一回"，于是开机后头 `social_cooldown_min * 60` 秒里
+        # `_due()` 一律判"冷却没到"，**每一条 offer 都被静默挡掉**（真机 2026-10-09，
+        # 见报告第一百六十八节）。生产路径**永不写 `0.0`**，这一格的钟口径一个字没动。
+        #
+        # 键取 `_cooldown_key()`（= 这一场是谁，见那个方法）。**只存内存、进程重启即清、
+        # 不落盘、不进日志**（只记长度）——跟 `_session_id` 同一条隐私口径。
+        self._last_asked_by_window: dict[str, float] = {}
+        # 冒话那一刻是**按哪一格**记的（v2-social-cooldown-per-window）：挂问可以挂 90 秒，
+        # 这中间用户完全可能切到别的会话（`_session_id` 就变了）。`_drop_stale_offer` 得回头
+        # 找**冒话那一格**去算挂了多久，拿当前这一格去取会取到别人头上。
+        self._asked_key = ""
+        # 帮聊窗口（v2-social-helping-window）：**用户点过一次 [好呀]**（或自己开口喊了
+        # "帮我回"、过了闸）的那一场，从此算"进过帮聊窗口"——之后对方**每来一句**都自动
+        # 出候选，不用每句再点一次确认；没进过的那一场，一条候选都不自动出。
+        #
+        # 键跟冒话冷却**同一套**（`_cooldown_key()`，按会话分格）：在甲那一场点过头，
+        # 不代表在乙那一场也要替人拿主意——换个人就是新的一格。**无 TTL、只在内存**：
+        # 切走再切回仍算进过（走出聊天窗那条"离场"路不清它），只有用户点 [不用了] 才清
+        # （见 `confirm` 那条 no 支路）。值是落戳那一刻，只为排查用——判据只看"有没有
+        # 这一格"。
+        self._helping: dict[str, float] = {}
         # 最近一次"要不要建对象攻略卡"那一问的时间点（v2-social-offer-dedup）：同一趟
         # 社交前台里只问一次，走出聊天窗再回来（`on_foreground`）才归零、重新问一次。
         self._last_offered = 0.0
@@ -975,6 +1281,104 @@ class SocialReplyService(QObject):
         这里只把已经记着的那个页型读出去：不改判定、不碰 OCR、不碰监听闸、不碰去重。
         """
         return is_personal_kind(self._page_kind)
+
+    # ---------- 冒话那道冷却按"这一场是谁"分格（v2-social-cooldown-per-window） ----------
+
+    def _cooldown_key(self) -> str:
+        """这一场冒话冷却记在哪一格：**眼下这一场是谁**（`_session_id` + 对象名）。
+
+        v2-social-cooldown-by-peer：`_session_id` 在**主窗合并模式**下恒是同一个值（真机
+        `data/logs/pet.log.1` 10:26-10:40 那几十行"这一场标识 2 字"），一个窗口里换了会话
+        它不动——于是所有单聊共用一格，切到别的人那儿先被别人的冷却挡 30 分钟。所以键里
+        再合进一份**对象名**（`_peer_name`，装配层从窗口标题里认出来的，独立聊天窗上就是
+        对方 / 群名）。真机佐证：10:37:41 标识一从 2 字变 6 字，10:37:50 那一句**当场就
+        冒出来了**——机制本身没坏，坏的是"所有会话共用一格"。
+
+        **认不出对象名就逐字退回裸 `_session_id`**（老行为，也是一个字符都不多出来的
+        降级）：测试桩没接 `peer_provider`、主窗、列表页、账号选择页全走这一支。
+
+        取不到（还没认出来 / 测试桩 / 合并窗口模式下读不出会话名）就是空串——**空串照样
+        是一格**，所以"认不出是谁"退化成"全场共用一格"，也就是这一改之前的老行为，不会
+        变成"永不冷却"。
+
+        **不记名字、不落盘**：这一格只在内存里当键用，日志里只记 `len()`（跟 `_session_id`
+        同一条隐私口径，见 `_sync_session` 那两行）。合进名字之后 `len()` 会从 2 变 5，
+        **仍然只是长度**。
+        """
+        sid = self._session_id or ""
+        peer = self._peer_name or ""
+        if not peer or peer == sid:
+            return sid
+        return f"{sid}|{peer}"
+
+    # ---------- 帮聊窗口（v2-social-helping-window） ----------
+
+    def _is_helping(self) -> bool:
+        """**眼下这一场**是不是已经进过帮聊窗口（用户点过 [好呀] / 喊过"帮我回"）。
+
+        这一格是"自动出候选"那条腿的闸门（v2-social-helping-window）：进过的那一场，
+        对方每来一句都自动出候选；没进过的那一场，一条都不自动出——要帮忙还是得点一下
+        那排按钮 / 开口喊一声。看的是 `_cooldown_key()`，跟冒话冷却同一套键：换个人就是
+        新的一格，在甲那一场点过头不代表在乙那一场也要替人拿主意。
+        """
+        return self._cooldown_key() in self._helping
+
+    def _mark_helping(self) -> None:
+        """把**眼下这一场**记成"进过帮聊窗口"（用户点了 [好呀]，或过闸喊了声"帮我回"）。
+
+        值是落戳那一刻（只为排查），判据只看"有没有这一格"——**无 TTL**：切走再切回
+        仍算进过，不走"过一阵就忘"那条（真机那会变成聊到一半宠物忽然不接了）。
+        """
+        self._helping[self._cooldown_key()] = self._clock()
+
+    def _forget_helping(self) -> None:
+        """把**眼下这一场**从帮聊窗口里退出来（用户点了 [不用了]：那就不接着帮了）。"""
+        self._helping.pop(self._cooldown_key(), None)
+
+    @property
+    def _last_asked(self) -> float | None:
+        """**眼下这一场**上次冒话的刻度（没冒过 = `None`）。
+
+        v2-social-cooldown-per-window：读的是 `_last_asked_by_window` 里"当前这一格"。
+        做成 property 而不是把调用点全改一遍，是因为这道冷却的**读写口子已经好几处**
+        （`_ask_offer` 落戳、`_due` 判冷却、冷却那行日志），而既有用例里还有十来处
+        `service._last_asked = …` 的直写——property 让两头**逐字不用改**，语义却已经
+        从"全场一格"换成"一场一格"。
+        """
+        return self._last_asked_by_window.get(self._cooldown_key())
+
+    @_last_asked.setter
+    def _last_asked(self, value: float | None) -> None:
+        key = self._cooldown_key()
+        if value is None:
+            # `None` 是"这一场从没冒过"，不是"冒过、时刻是 None"——所以是**抹掉那一格**，
+            # 不是往里塞个 None（塞进去 `_prune_asked` 也不好算）。
+            self._last_asked_by_window.pop(key, None)
+            return
+        self._last_asked_by_window[key] = value
+        self._prune_asked(value)
+
+    def _prune_asked(self, now: float) -> None:
+        """把早就过了冷却的那些格删掉（v2-social-cooldown-per-window）。
+
+        不 prune 的话这本字典只增不减：**进程不重启就一直攒**，聊过多少人就有多少格。
+        过期即无用（那一格的冷却已经跑完了，再冒话本来就不受它约束），所以删掉是安全的。
+        另外再压一道 64 格的上限，防的是"同一窗口里 `_session_id` 被截成各种长度"这种
+        极端情形把字典撑起来——超了就把**最旧**的那些格丢掉。
+
+        `now` 传的是刚写进去的那个刻度（生产里就是 `_clock()`），所以刚写的那一格
+        `now - now = 0` 永远不会被删掉。
+        """
+        cooldown = max(0, int(self._config.screen.social_cooldown_min)) * 60
+        stale = [k for k, v in self._last_asked_by_window.items()
+                 if now - v > cooldown]
+        for k in stale:
+            self._last_asked_by_window.pop(k, None)
+        overflow = len(self._last_asked_by_window) - _ASKED_MAX_WINDOWS
+        if overflow > 0:
+            for k in sorted(self._last_asked_by_window,
+                            key=lambda k: self._last_asked_by_window[k])[:overflow]:
+                self._last_asked_by_window.pop(k, None)
 
     def dismiss_offer(self, *, force: bool = False) -> None:
         """按钮收掉了（用户在框里自己说了话，或者界面换了一茬）：等于这次邀请作废。
@@ -1111,8 +1515,14 @@ class SocialReplyService(QObject):
         """
         # 不管冒不冒话，先记下"社交软件在不在前台"——主动求助那一拍靠它判断还
         # 值不值得再抓一屏。
+        #
+        # **认的是白名单**（v2-social-grab-whitelist）：`is_allowed_social_proc` 只认
+        # 微信那两个 exe 名，不再跟着分类表走。分类表说"社交"的还有 QQ / Telegram /
+        # Discord 一串，可抓屏那套量尺是照微信版面做的——前台站着它们时，这一格必须
+        # 是 False，整条线（监听、抓屏、候选）才一个都不动。分类那层判据
+        # （`is_social_proc`）没删，留着答"分类表说它算不算社交"，只是不再管触发。
         was_social = self._social_foreground
-        self._social_foreground = is_social_proc(proc)
+        self._social_foreground = is_allowed_social_proc(proc)
         self._last_proc = proc or ""
         if was_social and not self._social_foreground:
             # 走出聊天窗口 = 那排 [好呀] [不用了] 跟着没了，这次邀请到此作废
@@ -1148,14 +1558,37 @@ class SocialReplyService(QObject):
         # 关掉 OCR），或者这一拍连帧都取不到——两种都是"无从判起"，按口径 ① 的
         # "默认放行"办。上一拍的字还在认（`_chat_reading`）不算：它认的就是本屏，
         # 回来照样会报页型。
-        if not started and not self._chat_reading:
+        #
+        # 但**进程名都不在白名单里就不放**（v2-social-orphan-fix B-1）：这一拍要么来自
+        # 冷启动"可见窗口冒充前台"那条腿（`note_visible_social` 已经不这么干了，这里是
+        # 双保险），要么是某个不该触发这条线的进程——宁可这一拍不冒，也别对着一个
+        # 非白名单进程冒一句空 offer。
+        if not started and not self._chat_reading and is_allowed_social_proc(self._last_proc):
             self._ask_offer(self._last_proc)
+
+    def note_visible_social(self, proc: str) -> None:
+        """冷启动看到桌面上有**可见的**社交窗口（不一定是前台）：只把社交这条线置成
+        "可抓屏态"（`_social_foreground=True`、监听计时器醒着），**不冒充前台**——不抓屏、
+        不冒 offer（v2-social-orphan-fix B-1）。
+
+        跟前台信号（`on_foreground`）分两条腿：前台信号才配"冒邀请 / 抓屏那一整套"，
+        这里只回答"桌面上确实开着微信、这条线该醒着"。真前台是不是微信，交给下一次
+        `foreground_changed` 去纠正（那时 `on_foreground` 会照常走一遍）。老口径把可见
+        窗口的进程名直接冒充前台喂给 `on_foreground`，于是它抓不到帧（可见 ≠ 前台）就
+        撞上上面那道"默认放行"，空 offer 就这么冒出来（真机 22:35:51 冷启动那一拍）。
+        """
+        if not is_allowed_social_proc(proc):
+            return
+        self._social_foreground = True
+        self._last_proc = proc or ""
+        self._sync_listen_timer()
 
     def _ask_offer(self, proc: str) -> bool:
         """该冒这一句就冒（几道闸都过的话）。返回 True = 真冒了。
 
         闸门是：还有别的按钮占着气泡（`_can_offer`）、上一问没结果（`_running` /
-        `_awaiting`）、冷却没到（`_due`）、台词撞危机词——**外加调用方那道**
+        `_awaiting`）、冷却没到（`_due`）、台词撞危机词、**手上那屏字整个是"正在加载"这类
+        占位**（`_looks_like_loading_material`，`v2-social-list-leak-fix`）——**外加调用方那道**
         "仅单聊"（`v2-social-trigger-window-gate`，见 `on_foreground` 与 `note_page_kind`）。
         闸门没过就静默不冒（不报错、不记账），跟加那道闸之前逐字相同。
 
@@ -1167,18 +1600,46 @@ class SocialReplyService(QObject):
         把问句摆进气泡、又负责把 [好呀] [不用了] 排出来，`_pop_offer` 里那句
         `hide_speech_bubble()` 照样先收头顶（防别的线留着），只是这会儿本来就没东西可收。
         """
+        if self._is_helping():
+            # 这一场已经在帮聊窗口里了（v2-social-helping-window）：对方每来一句都自动
+            # 出候选，不必再反复问"要不要帮你回"。**摆在最前头、冷却那道日志之前**：
+            # 摆在后面的话，每次"非单聊 → 单聊"的跃迁都会在那行冷却日志上刷一句"被冷却
+            # 挡下"，真机排查时看着像是冷却在挡，其实挡它的是这一格。这一档不单独记
+            # 日志（跃迁跟着画面变走，记了会在真机上刷屏）。
+            return False
         if self._running or self._awaiting:
             return False
         if not self._can_offer():
             logger.debug("气泡上已经挂着别的按钮，这一句不冒（社交）")
             return False
         if not self._due():
+            # 这一格原来一声不吭（v2-social-due-sentinel）：闸门没过就静默不冒是这套的
+            # 老规矩，可冷却这一道**挡掉的是"本来该冒的那一拍"**——真机上排查"怎么不冒话"
+            # 时，日志里连一行都没有，只能靠反推开机时刻。补一行，让人一眼看得见。
+            logger.debug(
+                "社交邀请被冷却挡下：距上次冒话 %.0f 秒 < %.0f 秒（这一场标识 %d 字），这一句不冒",
+                self._clock() - (self._last_asked or 0.0),
+                max(0, int(self._config.screen.social_cooldown_min)) * 60,
+                len(self._cooldown_key()),
+            )
             return False
         # 台词写死也照样过一遍危机词（跟 companion.py / game.py 同款，红线不跳步）
         if crisis.is_crisis(ASK_LINE):
             logger.warning("社交邀请台词命中危机词，跳过这一句")
             return False
+        # **手上那屏字整个就是"正在加载"这类占位**（v2-social-list-leak-fix）：不冒话、也不
+        # 落戳。① 已经在页型那层拦了一道（`looks_like_list_page` 的第三条腿），这是**双
+        # 保险**——`on_foreground` 那条"没接 OCR / 取帧失败"的兜底路（见上面 `:1405`）压根
+        # 不走页型判定，它挡不住；那一路手上 `_chat_text` 若是上一拍认回来的占位屏，这里
+        # 就是唯一拦得住的。摆在落戳**之前**：落戳会把这一场的冒话冷却按在一个根本没聊起来
+        # 的屏上（Bug Y 的两处污染之一）。
+        if _looks_like_loading_material(self._chat_text):
+            logger.debug("这一拍手上只有「正在加载」这类占位字，不冒话、也不落戳")
+            return False
         self._last_asked = self._clock()
+        # 落戳那一刻顺记"记在哪一格"（v2-social-cooldown-per-window）：挂问能挂 90 秒，
+        # 这中间用户可能已经切到别的会话，`_drop_stale_offer` 得回头找**这一格**算挂了多久。
+        self._asked_key = self._cooldown_key()
         self._awaiting = True
         logger.debug("社交软件在前台（%s），冒一句要不要帮忙措辞", proc)
         self._bus.social_offer.emit(proc or "")
@@ -1198,16 +1659,35 @@ class SocialReplyService(QObject):
         免得连不上装配层时每一拍都冒一句。
 
         走出聊天窗时 `on_foreground` 把那一格清回空串，下一趟进来重新算一次跃迁。
+
+        **没冒成的那一拍不算数**（v2-social-due-sentinel）：这一格既是事实、又是跃迁锚点，
+        那就得"只有真冒出去了（`_ask_offer` 返回 True）才把它推到这一页"。被挡掉的那些拍
+        ——冷却没到（`_due`，开机头半小时那条静默闸门正落在这一档）、上一问还没结果
+        （`_running` / `_awaiting`）、气泡上挂着别的线的按钮（`_can_offer`）——把这一格
+        **退回空串**（"这一屏还没算数"，`is_personal_kind` 拿空串按"默认放行"办，所以
+        `in_personal_chat` 那边读到的仍旧是"人在单聊里"，一个字都不会误伤）：下一拍
+        （自动监听 1.5 秒一拍、或下一次 `on_foreground`）照样算跃迁、照着重试。
+        老口径这一格是**照报照记**的，于是被挡掉的那一拍就等于把这次跃迁**消费掉了**
+        ——页型已经推进到单聊，此后每一拍都是"没变"，这一趟再也别想冒。
         """
         prev = self._page_kind
-        self._page_kind = kind or ""
-        if not is_personal_kind(self._page_kind) or prev == self._page_kind:
+        kind = kind or ""
+        if not is_personal_kind(kind):
+            # 非单聊：不冒话，可"这一屏不是单聊"这个**事实照记**（`in_personal_chat` 读它，
+            # v2-social-card-timeout 拿它判"还是不是原来那条单聊"）；用户从群聊 / 会话总
+            # 列表点进某个人的单聊时，下一拍照样算一次新跃迁。
+            self._page_kind = kind
             return
+        if prev == kind:
+            return                       # 连着停在单聊上，不重复问（真机"同一句反复问"）
+        self._page_kind = kind
         # 认字是后台跑的（约 4 秒），回来时前台可能早切走了——跟 `_on_listen_read` 门口
-        # 那道闸同一个道理，这儿再确认一次。
+        # 那道闸同一个道理，这儿再确认一次。这一档不算"没冒成"，人已经不在这一屏了，
+        # 走出社交前台那一拍 `on_foreground` 会把这一格清回空串，下一趟重新算。
         if not self.enabled or not self._social_foreground:
             return
-        self._ask_offer(self._last_proc)
+        if not self._ask_offer(self._last_proc):
+            self._page_kind = ""
 
     # ---------- 对方最新那条（v2-social-fewshot：截屏 OCR，读完即弃） ----------
 
@@ -1225,7 +1705,11 @@ class SocialReplyService(QObject):
         （没接那两只手 / 取不到帧），那就带着手上已有的字接着走；另一种是 `_chat_reading`
         已经是 True——**上一屏正在认，它认的就是本场的对方原话**，该挂上去等，不是丢开。
         """
-        if self._grab_chat is None or self._read_chat is None or self._chat_reading:
+        # 自动监听那一趟还在认同一屏（`_listen_reading`）也不重复抓（v2-social-dup-ocr）：
+        # 老闸只认 `_chat_reading`，前台采样 5 秒发的那一声会赶在 listen 还在认时又抓一帧、
+        # 把同一屏认两遍（真机 2026-10-10 01:19:53/54 两帧各烧 5.5 秒）。跟 `_poll_listen` /
+        # `_poll_pending_snap` 门口那两行对齐。
+        if self._grab_chat is None or self._read_chat is None or self._chat_reading or self._listen_reading:
             return False
         try:
             array = self._grab_chat()
@@ -1234,6 +1718,21 @@ class SocialReplyService(QObject):
             return False
         if array is None:
             return False
+        # 换会话了（v2-social-session-sync-on-foreground）：先清掉上一场的拟稿记忆，**再把
+        # 这一屏的签名作废**——这一屏是新一场的底。跟 `_poll_listen` / `_snap_pending` 那两处
+        # 同一套口径：会话标识是装配层拿**这一拍抓的这帧**读出来的，同一个拍里清掉才算数。
+        #
+        # 为什么非要在这一处也刷一次：这一趟正是"用户刚从别处切回社交软件"那一瞬，而会话
+        # 标识原先只在 `_poll_listen`（1.5 秒一拍，**只在自动监听开着时才跑**）与
+        # `_snap_pending`（只在挂问期间跑）里刷。于是"在微信里换了个人、走出聊天窗再切回来"
+        # 这条路上，`_session_id` 还端着上一场的人——`_cooldown_key()`（冒话冷却按"这一场是
+        # 谁"分的那一格）就记到**上一个人**头上：切回乙那一场，冒话记在甲头上，乙自己那一格
+        # 依旧是"从没冒过"（v2-social-cooldown-per-window 的前提就不成立了）。
+        if self._sync_session():
+            # 签名紧接着就被刚抓的这帧顶掉（这一段是"无条件记下这一屏"，不像
+            # `_snap_pending` 那边还要先比一比），所以这一行在这里只是把"换人"按时序摆在
+            # 签名之前、跟另外两处对齐，不是省一趟 OCR 的闸。
+            self._snap_seen_fp = None
         self._chat_reading = True
         # 抓拍这条腿认过这一屏了，记一笔（v2-social-on-demand-snap）：挂住那一问的
         # 按需抓拍（`_snap_pending`）拿它判"这一屏认过了"，别把同一屏再烧一趟 OCR。
@@ -1255,6 +1754,14 @@ class SocialReplyService(QObject):
         """
         self._chat_reading = False
         read = as_chat_read(text)
+        # 认字之后**再问一次**"这一场是谁"（v2-social-peer-by-titlebar）：主窗合并模式下
+        # 对象名是从**屏上标题带**认出来的，而那条带子要等这一趟 OCR 才有结果——抓屏那一拍
+        # 问过一次（那次只拿得到窗口标题，主窗上就是应用名），所以必须在这拍补一次。
+        # **返回值忽略**：换人清记忆在抓屏那一拍已经做过了（`_session_id` 没变时这里本来就
+        # 回 False），这一行要的只是把服务里那一格对象名刷成刚认出来的那个。
+        # 摆在材料赋值**之前**：`note_page_kind` 那一步读冷却键（`_cooldown_key()`）时，
+        # 名字已经是这一场的了——`_ask_offer` 正是从那儿冒出来的。
+        self._sync_session()
         # 取**末尾**不是开头（v2-social-ocr-path）：OCR 从上往下读，开头是旧消息，
         # 对方最新那条压在下面。留末尾一段，让它专心认"最近对方那条"，别被整屏旧字带跑。
         # 切的位置：**一条一条**往回捡（v2-social-grab-fix 起，`_tail_context`），
@@ -1465,7 +1972,15 @@ class SocialReplyService(QObject):
         """
         if not self._awaiting:
             return False
-        hung = self._clock() - self._last_asked
+        # **按"冒话那一刻那一格"去取**（v2-social-cooldown-per-window）：挂问能挂 90 秒，
+        # 这中间用户切到别的会话，`_cooldown_key()` 就变了——拿当前这一格去取会取到**别人**
+        # 那一格（取到就永远判"没过期"，这一问再也没人来收）。所以认 `_asked_key`。
+        asked = self._last_asked_by_window.get(self._asked_key)
+        if asked is None:
+            # 到这儿本该不可能（`_awaiting` 只有真冒过话才会立起来，那时 `_last_asked` 已经
+            # 记上了）。留着这一格只是不让人踩空（v2-social-due-sentinel 把初值换成了 None）。
+            return False
+        hung = self._clock() - asked
         if hung < OFFER_HANG_S:
             return False
         logger.info(
@@ -1533,6 +2048,13 @@ class SocialReplyService(QObject):
         ident = self._normalize_listen(self._session_provider())
         if not ident:
             return False
+        # 对象名跟会话标识同一拍刷（v2-social-cooldown-by-peer）：**两条各自的 provider 是
+        # 同一个来源**（装配层那次读到的同一个窗口标题），所以这里不会出现"标识换了、名字
+        # 还是上一场的"。名字取不到（主窗 / 桩）就留空串，`_cooldown_key()` 退回裸标识。
+        # 这一行**不动返回值**：换人清记忆那条判据照旧只看 `ident`，一个字没改。
+        self._peer_name = self._normalize_listen(
+            self._peer_provider() if self._peer_provider is not None else ""
+        )
         previous = self._session_id
         self._session_id = ident
         if not previous or previous == ident:
@@ -1653,8 +2175,11 @@ class SocialReplyService(QObject):
         - 挂过 `OFFER_HANG_S`（跟邀请那排按钮同一个寿命）→ 收掉，并让 `_drain_pending`
           按过期如实说一句——跟批次17 甲那条线同一处口径，不另开一条。
         - 本服务正认着字（`_chat_reading` / `_listen_reading`）→ 让那一拍先回来。
-        - 既有的自动轮询计时器活着 → 让给它（那边 1.5 秒一拍、带一整套纪律）；这条腿
-          只在"轮询没在跑、而这一问还挂着"时出力。
+        - **有挂问优先（v2-social-orphan-fix B-2）**：老口径在自动轮询计时器活着时直接
+          让位（`if self._listen_timer.isActive(): return`），结果挂住的那一问整个让给
+          监听那条腿——而监听腿认完字又不回头收挂问（`_on_listen_read` 不 `_drain_pending`），
+          这一问就孤儿化了。现在**不让位**：只要还挂着，这一拍照抓。两边都会收口（监听腿
+          也补了一道 `_drain_pending`），双保险、不会双拟。
         """
         if self._pending_draft is None:
             self._stop_pending_snap()
@@ -1664,8 +2189,6 @@ class SocialReplyService(QObject):
             self._drain_pending()
             return
         if self._chat_reading or self._listen_reading:
-            return
-        if self._listen_timer.isActive():
             return
         self._snap_pending()
 
@@ -1810,6 +2333,20 @@ class SocialReplyService(QObject):
             logger.debug("前台已经不是社交软件了，这一屏当没看过（不认字、不起草）")
             return
         read = as_chat_read(text)
+        # 同 `_on_screen_read`：认字之后补问一次"这一场是谁"（v2-social-peer-by-titlebar）。
+        # 自动那条腿冒不冒也是照这把键分格的，名字得在这一拍就位。返回值同样忽略。
+        self._sync_session()
+        # **有挂问先收口（v2-social-orphan-fix B-2）**：挂住的那一问（点 [好呀] 后抓不到
+        # 画面）在监听这条腿认完字之后得回头续上——老口径这里不 `_drain_pending`，那一问
+        # 就干挂到过期。这一屏的字先喂给挂问（`_drain_pending` 自己判"有字拟、没字再挂"），
+        # 它真拟了（`_pending_auto_source` 立起来）就收手，别同屏再走一遍下面的自动拟。
+        if self._pending_draft is not None:
+            self._chat_text = _tail_context(read)
+            if self._chat_text:
+                self._chat_text_at = self._clock()
+            self._drain_pending()
+            if self._pending_auto_source:
+                return
         # **这一屏认出来不是单聊就不进帮聊**（v2-social-trigger-window-gate）：群聊里
         # 对方那句话可能是张三说的，自动拟一段"回他"就答错了人；会话总列表 / 订阅号 /
         # 文件传输助手那几种页更是一句人话都没有。页型由装配层认字那一步判好挂在 read 上。
@@ -1839,13 +2376,34 @@ class SocialReplyService(QObject):
             if new_tail:
                 self._last_listen_tail = new_tail
             return
-        self._last_listen_tail = new_tail
         if kind == "self":
+            # **帮聊窗口里"自认为 self、但色卡一个答案都没给"的一拍不记账，也不认作处理过
+            # （v2-social-helping-window 缺口3）**：人在帮聊窗口里本来就在打字 / 粘贴，
+            # 空闲时长那条兜底腿（`idle_sec < SEND_IDLE_S`）这会儿最容易把**对方刚回的**那条
+            # 读成"自己发的"。老口径照样把尾巴推进去——下一拍一算"字没变"（`"none"`），
+            # 加上画面指纹没翻（`_poll_listen` 那一步连 OCR 都到不了），对方那句就此咽掉，
+            # 一直到他再发一条才醒。
+            #
+            # 所以这一档**不推进尾巴**、并把画面指纹作废：下一拍重新认一遍，色卡认出来是
+            # 白气泡就照拟。**不碰 `_last_draft_source`**：材料没变的话去重闸照旧兜住，
+            # 不会因为"多认了一遍"就狂生成。
+            #
+            # 窗口**外**的老口径一个字没动（尾巴照推进）：那条路上没有"用户正在打字"这个
+            # 前提，`self` 判定的可信度比窗口里高，不去动它。
+            if self._is_helping() and not read.tail_sender:
+                self._last_listen_kind = "self"
+                self._last_fingerprint = None
+                logger.debug(
+                    "帮聊窗口里这一拍分不出末尾是谁（色卡没给答案），当没看过，下一拍再认"
+                )
+                return
             # 用户自己刚发的：**静默不插嘴**（v2-social-remove-ownmsg-prompt）——一条提示
             # 都不弹（旧口径在这儿冒一句"这条是你自己发的，对方还没回新内容"，用户正打字，
             # 这一句既没用又碍事）。也不拟草稿、不替换成别的文案、不报错，只把归属记下。
+            self._last_listen_tail = new_tail
             self._last_listen_kind = "self"
             return
+        self._last_listen_tail = new_tail
         # incoming：对方回了新消息 → 跳确认，直接带这一屏字拟候选。
         self._last_listen_kind = "incoming"
         # 喂模型的是**对方那半边、按条取尾**（v2-social-grab-fix），**不是** `new_tail`
@@ -1879,7 +2437,20 @@ class SocialReplyService(QObject):
         手动那条路（用户自己开口喊帮回）走 `handle_request`，跟这里**共用同一道闸**
         （v2-social-offer-dedup）：同一份材料在那儿也照压不误——材料真变了才放行，
         没变被当变就压住，两条路一个口径。
+
+        **没进过帮聊窗口就不自动出候选（v2-social-helping-window，C-1）。** 这是"宠物
+        主动帮"与"用户请它帮"的分界：用户点头过（点 [好呀] / 喊"帮我回"）的那一场，对方
+        每来一句都自动出候选；**从没点头过**的那一场——也许他正跟对象拌嘴、正跟领导回话
+        ——宠物在旁边一句一句地自动拟，既烧模型又碍事。收窄之后能自动出候选的只有"用户
+        点过头的那几场"，比原来"所有单聊场次"严格更省。
         """
+        # **这一道闸摆在材料 / 去重 / 冷却三道之前**：那三道都是"这一份该不该拟"，而这一道
+        # 是"这一场要不要自动帮"——不在同一条线上。挡在这一步，连 `_last_listen_at` 那格
+        # 冷却都不推进：用户之后点 [好呀]，下一句要能立刻出候选，别被前面空转的几拍顶掉。
+        # **挂问那条腿**（`_drain_pending` → `_pending_draft` → `_draft_now`）走的是另一个
+        # 入口，不受这一道管——那是用户已经开口要的那一下，跟"自动"是两回事。
+        if not self._is_helping():
+            return
         if self._running:
             return
         source = self._normalize_listen(chat_text)
@@ -1922,9 +2493,28 @@ class SocialReplyService(QObject):
         )
 
     def _due(self) -> bool:
-        """现在该不该冒这句（社交这一档是**跨应用**共用的冷却）。"""
+        """现在该不该冒这句。**按"眼下这一场"判**（v2-social-cooldown-per-window）。
+
+        原来这道冷却是**跨应用、跨人共用**的一格（一个标量 `_last_asked`）：跟甲聊过、
+        冒过一句，这半小时里切到乙那边一句都不冒了。现在读的是 `_last_asked` 这个
+        property——它按 `_cooldown_key()`（这一场是谁）取当前那一格。**冷却时长一个字没动**
+        （还是 `social_cooldown_min` 分钟），换的只是"这半小时算在谁头上"。
+
+        **这一场从没冒过（没那一格 / 值是 `None`）直接放行**（v2-social-due-sentinel）：
+        冷却那格比的是 `_clock()`，而生产那只钟是 `time.monotonic()` = `GetTickCount64()`
+        = **开机以来的秒数**。老口径拿 `0.0` 当"从没冒过"的哨兵，等于说"进程刚起 0 秒那会儿
+        冒过一回"——开机后头 `social_cooldown_min * 60` 秒里一律判"冷却没到"，每一条 offer
+        都被静默挡掉（真机 2026-10-09 那两场：开机 15 分钟 / 6 分钟时开的桌宠，全程一次没冒）。
+        哨兵语义按窗口原样复制，**钟的口径一个字没动**（还是 monotonic，不做"进程相对时间"）。
+
+        `_cooldown_key()` 取不到是谁（空串）时全场共用一格——那就退化成这一改之前的老行为，
+        不会变成"永不冷却"。
+        """
+        last = self._last_asked
+        if last is None:
+            return True
         cooldown = max(0, int(self._config.screen.social_cooldown_min)) * 60
-        return self._clock() - self._last_asked >= cooldown
+        return self._clock() - last >= cooldown
 
     # ---------- 要 / 不要 ----------
 
@@ -1945,9 +2535,16 @@ class SocialReplyService(QObject):
         # 不然他重新问一次会被自己的锁挡在外面。
         self.reset_done()
         if not self._is_yes(answer):
+            # [不用了]：这一场从帮聊窗口里退出来（v2-social-helping-window）——用户不想
+            # 接着被帮了，之后再来的消息就得他点一下或喊一声才起草。
+            self._forget_helping()
             self._want_situation_until = 0.0
             logger.debug("用户说不用，这次就不写了")
             return False
+        # [好呀]：这一场从此算"进过帮聊窗口"（v2-social-helping-window），之后对方每来
+        # 一句都自动出候选，不用每句再点一次。落戳排在 `_draft_now` **之前**：那一下就是
+        # "用户点头"那一瞬，跟这一趟抓不抓得到屏幕无关（抓不成是另一回事）。
+        self._mark_helping()
         return self._draft_now("")
 
     @staticmethod
@@ -2003,6 +2600,11 @@ class SocialReplyService(QObject):
             return False
         if not self.is_request(text):
             return False
+        # 过了闸才算"进过帮聊窗口"（v2-social-helping-window）：摆在这一行**之后**——
+        # 危机那一句（`is_request` 里那道红线）与"没说求文的词"那两句都到此为止，一个字
+        # 都不会落到这一格上（宁可这句草稿不做，也不许危机那句被当成"他要我帮聊"）。
+        # 手动这条路跟点 [好呀] 那条落的是**同一格**。
+        self._mark_helping()
         return self._draft_now(text)
 
     def _draft_now(self, text: str) -> bool:
@@ -2247,12 +2849,23 @@ class SocialReplyService(QObject):
     def confirm_card(self, answer: str) -> bool:
         """用户对"要不要建对象攻略卡"点了轻按钮。返回 True = 要建，False = 不用了。
 
-        [不用了] 就只回候选那几段，什么都不多说、不劝。
+        [不用了] 就只回候选那几段，什么都不多说、不劝；顺带把这一场从帮聊窗口里退出来
+        （`_forget_helping`，v2-social-list-leak-fix）——这是真机上唯一还按得到的退出出口，
+        见 §179-己.3。
         """
         self._card_awaiting = False
         if not self.enabled:
             return False
-        return self._is_yes(answer)
+        if not self._is_yes(answer):
+            # [不用了]：这一场从帮聊窗口里退出来（v2-social-list-leak-fix）。§179-己.3
+            # 点过的那个坑——冒话邀请在帮聊窗口里是不冒的（`_ask_offer` 开局就早退），
+            # 于是"建卡那一问"的 [不用了] 是**真机上唯一还按得到的**退出出口；不在这儿
+            # 清这一格，进了窗口的会话在进程重开之前就再也退不出来。**只清这一场那一格**
+            # （`_cooldown_key()`）：`_last_asked_by_window` 一个字不碰——冒话冷却照旧按
+            # 30 分钟走（那是另一回事，用户拍板保留）。
+            self._forget_helping()
+            return False
+        return True
 
     @property
     def last_request(self) -> str:
@@ -2301,15 +2914,20 @@ __all__ = [
     "DEFAULT_DRAFT_WORDS",
     "EXAMPLES_CLIP", "FAILED_LINE", "GUIDE_CARD_GOAL", "GUIDE_CARD_ICON",
     "GUIDE_CARD_TITLE", "GROUP_HEAD_MAX_CHARS", "GROUP_NOTICE_LINE",
-    "LIST_PAGE_MARK_KINDS", "LIST_PAGE_TIME_ROWS", "NON_PERSONAL_PAGES", "NO_CHAT_CONTEXT",
+    "LIST_PAGE_MARK_KINDS", "LIST_PAGE_TIME_ROWS", "LIST_TIME_BAND_PX", "LIST_TIME_MAX_W_PX",
+    "LIST_TIME_ROWS_MIN", "NON_PERSONAL_PAGES", "NO_CHAT_CONTEXT",
     "NO_EXAMPLES",
     "NO_PEER_LINE_HINT",
     "OFFER_HANG_S", "OFFLINE_CANDIDATES", "PAGE_CHANNEL", "PAGE_FILEHELPER", "PAGE_GROUP",
-    "PAGE_HEAD_ROWS", "PAGE_LIST", "PAGE_MINI", "PAGE_PERSONAL", "PENDING_SNAP_MS",
+    "PAGE_HEAD_ROWS", "PAGE_LIST", "PAGE_LOGIN", "PAGE_MINI", "PAGE_PERSONAL", "PENDING_SNAP_MS",
     "SITUATION_WINDOW_S",
+    "SOCIAL_ALLOWED_PROCS",
     "SOCIAL_CATEGORY",
     "SocialReplyService",
-    "chat_page_kind", "classify_chat_page", "is_personal_chat", "is_personal_kind",
-    "is_social_proc",
+    "chat_page_kind", "classify_chat_page", "is_allowed_social_proc", "is_personal_chat",
+    "is_personal_kind", "is_social_proc",
+    "looks_like_list_boxes",
     "looks_like_list_page",
+    "looks_like_loading_page",
+    "looks_like_account_pick_page",
 ]

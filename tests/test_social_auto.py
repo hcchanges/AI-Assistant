@@ -103,6 +103,13 @@ def main() -> int:
     # 干等 20 秒才验得到"解锁"。时间也钉住：往前推多少，就当过了多少秒。
     clock = {"t": 1000.0}
     service._clock = lambda: clock["t"]
+    # 冒话那道冷却不在这一批用例的射程里（这儿验的是**自动监听**那条线），先按住：
+    # 不按住的话，第一次"非单聊 → 单聊"的跃迁会冒一句邀请，邀请一挂上 `_awaiting`，
+    # `_poll_listen` 后面几拍就全被它挡回去（挡轮询是既有的设计，见它门口那行）。
+    # v2-social-due-sentinel 之前这一格是**靠"开机 30 分钟内一律静默"那道 bug 蒙对的**
+    # ——刻度 1000 秒 < 冷却 1800 秒，`_due()` 一律判"冷却没到"。哨兵一修，这层蒙的
+    # 掩护就没了，得照 test_social_auto 老规矩显式按住。
+    service._last_asked = clock["t"]
     service._social_foreground = True
     service._last_fingerprint = None
     service._last_listen_tail = ""
@@ -120,8 +127,8 @@ def main() -> int:
 
     check("自动监听开关默认开（config 里 social_auto_listen）",
           app.config.screen.social_auto_listen is True, "")
-    check("轮询间隔钉在 1.5 秒（节奏由对方定，不抢不刷屏）",
-          service._listen_timer.interval() == LISTEN_POLL_MS == 1500,
+    check("轮询间隔钉在 0.5 秒（v2-social-offer-fast-latency：原 1.5；指纹只是毫秒级哈希，代价低）",
+          service._listen_timer.interval() == LISTEN_POLL_MS == 500,
           f"{service._listen_timer.interval()} / {LISTEN_POLL_MS}")
     check("指纹签名稳定：同一帧同一签名、不同帧不同签名",
           service._fingerprint("FRAME_A") == service._fingerprint("FRAME_A")
@@ -155,6 +162,31 @@ def main() -> int:
     check("打底拍认了一屏字（后台 OCR 真跑了一回）", reader_calls["n"] >= 1,
           f"{reader_calls['n']} 次")
 
+    # v2-social-helping-window（C-1 收窄）：自动那条路的**前提**是"这一场已经进了帮聊窗口"
+    # ——点过 [好呀]，或者喊过一句"帮我回"。没进过窗口就只是安静看着，不自动出候选。
+    # 原来这里钉的是"对方一回就拟"，那条口径已被推翻（见报告第一百七十九节），改成先验
+    # 未进窗口那一档，再落戳看它是不是真的开始自动拟。
+    probe.reset()
+    reader_calls["n"] = 0
+    stub.prompts.clear()
+    idle["sec"] = 10.0
+    grab["frame"] = "FRAME_NW"          # 又换了一屏、又多了新话，条件跟下面那一拍一样
+    ocr["text"] = "茗风：今天玩得开心吗 茗风：周末有空一起爬山吗 茗风：你倒是说句话呀"
+    service._poll_listen()
+    wait_for(lambda: not service._listen_reading)
+    drain_threads()
+    pump(0.1)
+    check("★ 没进帮聊窗口（没点过 [好呀]、也没喊过「帮我回」）→ 对方回消息也不自动拟候选",
+          not probe.candidates, f"{len(probe.candidates)} 组")
+    check("★ 没进窗口时连模型都不调（不是调完把结果丢掉）", not stub.prompts,
+          f"{len(stub.prompts)} 条")
+
+    # 进窗口这一下：真机上是点 [好呀]、或者喊一句"帮我回"（那条腿的落戳在
+    # `test_social_continuous.py` ① 里验）。这里直接把这一格填上——本节验的是**进去之后**
+    # 自动监听那条线。本模块没接会话标识那只手（`_session_provider is None`），
+    # `_cooldown_key()` 一直是空串，所以填一次就一直开着。
+    service._mark_helping()
+
     # 对方回新消息：画面变了 + 字变了 + 空闲（没在敲键盘）→ 直接拟
     probe.reset()
     reader_calls["n"] = 0
@@ -166,7 +198,7 @@ def main() -> int:
     wait_for(lambda: bool(probe.candidates))
     drain_threads()
     pump(0.1)
-    check("对方回消息 → 候选直接出来了（不点确认）", len(probe.candidates) == 1,
+    check("进了帮聊窗口 → 对方回消息 → 候选直接出来了（不点确认）", len(probe.candidates) == 1,
           f"{len(probe.candidates)} 组")
     check("出来的就是模型拟的那条", bool(probe.candidates)
           and probe.candidates[0][0]["draft"] == "挺开心的，你呢？",
@@ -209,6 +241,8 @@ def main() -> int:
 
     # ① 那一拍给出候选时，服务把"这一段的完成态"锁上了（v2-social-copy-clean）。这一节
     # 验的是**另一次社交**，所以先把时钟推过那段短期冷却，再往下走。
+    # 帮聊窗口（v2-social-helping-window）从 ① 起就一直开着——本节验的正是"已经在帮这一场"
+    # 时末尾归属怎么判；本模块会话标识是空串，那个戳一直有效，不再重复落。
     clock["t"] += SOCIAL_DONE_COOLDOWN_S + 1
     service._running = False
     probe.reset()

@@ -354,6 +354,29 @@ class OcrReader:
         from life.screen.social_window import parse_ocr_lines
         return parse_ocr_lines(self.read_raw(array))
 
+    def detect_boxes(self, array):
+        """**只跑检测**、不跑识别（v2-social-offer-fast-latency）：回字框列表；没装 / 出错给 None。
+
+        跟 `read_raw` / `read_lines` 共用同一个引擎、同一份懒加载，只是把识别那一环关掉
+        （RapidOCR 的 `use_rec=False`）——检测是整趟里最便宜的一环，识别才占那几秒的大头。
+        社交那条线拿它当"这一屏像不像会话总列表"的**廉价先验**：命中就整趟省掉识别。
+
+        返回的是检测环的原始形状（每个框是一串四点多边形 `[[x, y], ...]`），坐标已换算回
+        **原图**（RapidOCR 自己在 `__call__` 里做过这一步）。认成空屏（一个框都没有）回
+        `[]`——跟"没接引擎"的 `None` 分得开。
+        """
+        engine = self._ensure()
+        if engine is None or array is None:
+            return None
+        try:
+            result = engine(array, use_det=True, use_cls=False, use_rec=False)
+        except Exception as exc:      # noqa: BLE001 —— 检测失败不该把认字那条线带崩
+            logger.debug("OCR 只检测失败: %s", exc)
+            return None
+        if isinstance(result, tuple) and len(result) == 2:
+            result = result[0]
+        return result if result is not None else []
+
     def read_raw(self, array):
         """把 OCR 引擎的**原始返回**交出去；没装 / 出错给 None。
 
@@ -1193,6 +1216,16 @@ class ScreenMonitor(QObject):
         靠框去图上取气泡底色，才分得出"这行是自己发的还是对方发的"。没装 / 出错回空表。
         """
         return self._reader.read_lines(array)
+
+    def detect_screen_boxes(self, array) -> list:
+        """**只跑检测**、不跑识别（v2-social-offer-fast-latency）：回字框列表；没接 / 出错回空表。
+
+        社交那条线在**认字之前**先跑这一手，拿字框几何判"这一屏像不像会话总列表"，
+        命中就整趟省掉识别（见 `social.looks_like_list_boxes`）。跟 `read_screen_lines`
+        共用同一台引擎。空表 = 没接引擎 / 认成空屏 / 出错，三种都由调用方当"判不出来"
+        处理（那就照旧认字，一步都不少）。
+        """
+        return self._reader.detect_boxes(array) or []
 
     def _analyze_sample(self, array, cv_array):
         """**后台线程**里把两条腿跑完，回主线程一个结论。

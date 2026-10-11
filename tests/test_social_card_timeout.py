@@ -1,19 +1,23 @@
-"""帮聊那一则"离开对话窗口满 3 分钟自动清掉"（v2-social-card-timeout）的自动测试。
+"""帮聊那一则"上屏满 3 分钟就清掉"（v2-social-card-timeout → -absolute）的自动测试。
 
-用户拍板的口径（已确认）：
+用户拍板的口径（v2-social-card-timeout-absolute 起，取代老口径）：
 
-1. 卡片生成 → 起 3 分钟计时（`CARD_CLEAR_S = 180`）；
-2. 期间点了「复制回复」→ 取消计时（内容已经被取走，留着无害）；
-3. 用户**离开对话窗口**（宠物浮窗失焦 / 被收起，或微信对话窗口不在前台，**任一即可**）
-   且没复制 → 满 3 分钟 → 清空那一则、回到初始聊天态（输入框还在、建议气泡收起）；
-4. 用户**回到对话窗口**（重新激活，且仍在**原来那条单聊**）→ 停表、留卡，下次再离开
-   重新计。
+1. 卡片**上屏那一拍**起一只 `CARD_CLEAR_S = 180` 秒的单发表——**绝对**的，数的是
+   "这一则在屏幕上活多久"，跟人在不在跟前没关系；
+2. 期间点了「复制回复」→ 撤表（内容已经被取走，留着无害）；
+3. 到点 → 清空那一则、回到初始聊天态（输入框还在、建议气泡收起）+ 把承载它的聊天窗
+   淡出收起（不留空窗）；
+4. 用户**离开 / 回到对话窗口**（宠物浮窗失焦 / 被收起，或微信对话窗口不在前台，**任一
+   即可**）只记 `_card_away` 这个事实：走开不提前清、回来不停表、抖动多少次都不重计
+   ——老口径（离开才计、回来停表）真机上 37 次起表只等到 1 次清零，这一版把它拆了。
 
-本模块把上面四条一个一个走一遍，外加"边界：两种离开判定各自都算数"与"红线"两节。
+本模块把上面四条一个一个走一遍，外加"边界：两种离开判定各自都算数"与"红线"两节；
+"人在跟前也照清 / 抖动不重计 / 到点收窗 / 收窗那几行日志"另起一节在
+`tests/test_social_card_timeout_absolute.py`。
 
 计时那几节把 `CARD_CLEAR_S` 临时改小（0.3 秒）**跑真的 Qt 定时器**——不是"直接叫一遍
-超时函数"那种假绿：`_note_card_left` 是起表那一刻现读模块常量的，改小之后 `pump()` 一
-小会儿就等于"3 分钟到了"。真机上那一档 180 秒在红线一节里按真值读一遍。
+超时函数"那种假绿：起表那一刻现读的就是模块常量，改小之后 `pump()` 一小会儿就等于
+"3 分钟到了"。真机上那一档 180 秒在红线一节里按真值读一遍。
 
 红线：pet.db / mind.db 零写入；零新依赖；不模拟按键，**测试自身也不碰剪贴板**（写剪贴板
 那只手用记录员顶掉）；`config.yaml` / `.vscode` 一字不碰。
@@ -91,7 +95,7 @@ def main() -> int:
 
     try:
         # ---------------------------------------------------------------- S0
-        section("S0 卡片生成那一刻：状态是初始那三样、表停着（用户就在框跟前，先不计）")
+        section("S0 卡片上屏那一刻：状态是初始那三样、**绝对表已经跑起来了**")
         bubble.append_pet(CHAT_LINE)          # 一句普通聊天，用来验"清卡片不动普通记录"
         _show_card(app)
         check("★ 帮聊那一则上屏了（记录区里就一条打标的）", len(_cards(bubble)) == 1,
@@ -101,9 +105,11 @@ def main() -> int:
         check("★ 卡片在、还没被复制、用户也没离开",
               (app._card_open, app._card_copied, app._card_away) == (True, False, False),
               f"open={app._card_open} copied={app._card_copied} away={app._card_away}")
-        check("★ 生成这一拍**不起表**（口径：离开才开始计）",
-              app._card_clear_timer.isActive() is False,
-              f"active={app._card_clear_timer.isActive()}")
+        check("★ 上屏这一拍表就起了（口径：绝对 180 秒，数的是卡片活多久）",
+              app._card_clear_timer.isActive() is True
+              and app._card_clear_timer.interval() == int(real_clear_s * 1000),
+              f"active={app._card_clear_timer.isActive()} "
+              f"interval={app._card_clear_timer.interval()}ms")
         check("单发定时器：真跑起来也只打一枪",
               app._card_clear_timer.isSingleShot() is True, "")
 
@@ -115,9 +121,9 @@ def main() -> int:
         pump(0.1)
         check("★ 拟稿那条腿走完，卡片自己上屏了（不是本模块硬摆上去的）",
               len(_cards(bubble)) == 1, f"{len(_cards(bubble))} 条")
-        check("★ 真流程出来的卡片：三样状态与上一条一样，表也没起",
+        check("★ 真流程出来的卡片：三样状态与上一条一样，绝对表也起了",
               (app._card_open, app._card_copied, app._card_away,
-               app._card_clear_timer.isActive()) == (True, False, False, False),
+               app._card_clear_timer.isActive()) == (True, False, False, True),
               f"open={app._card_open} copied={app._card_copied} away={app._card_away} "
               f"active={app._card_clear_timer.isActive()}")
 
@@ -126,20 +132,26 @@ def main() -> int:
         mind_before = app.mind_store.fragment_count()
 
         # ---------------------------------------------------------------- S1
-        section("S1 不复制 + 离开窗口 → 3 分钟到 → 清空那一则、回初始聊天态")
-        bubble.show_offer("social_card")      # 真机这一拍本来就挂着"要不要建攻略卡"那排按钮
-        pump(0.05)
+        section("S1 不复制 + 到点 → 清空那一则、回初始聊天态、承载它的聊天窗一并收起")
         shortened = _shorten_clear(0.3)
         try:
+            bubble.show_offer("social_card")  # 真机这一拍本来就挂着"要不要建攻略卡"那排按钮
+            _show_card(app)                   # 上屏：绝对表就按这时候的 0.3 秒起
+            check("★ 上屏这一拍起的表就是 `CARD_CLEAR_S`（本模块临时改成 0.3 秒）",
+                  app._card_clear_timer.isActive() and app._card_clear_timer.interval() == 300,
+                  f"active={app._card_clear_timer.isActive()} "
+                  f"interval={app._card_clear_timer.interval()}ms")
             bubble.user_left.emit()           # 离开（气泡失焦）
             pump(0.05)
-            check("★ 离开这一拍才开始计时，秒数就是那一刻的 `CARD_CLEAR_S`",
-                  app._card_clear_timer.isActive() and app._card_clear_timer.interval() == 300,
+            check("★ 离开这一拍**不动那只表**（还是上屏那一刻起跑的那一只）",
+                  app._card_clear_timer.isActive() is True
+                  and app._card_clear_timer.interval() == 300,
                   f"active={app._card_clear_timer.isActive()} "
                   f"interval={app._card_clear_timer.interval()}ms")
             check("这一拍状态：卡片还在、没被复制、标记成'离开了'",
                   (app._card_open, app._card_copied, app._card_away) == (True, False, True),
                   f"open={app._card_open} copied={app._card_copied} away={app._card_away}")
+            check("离开这一拍框还开着（离到点上还有一会儿）", bubble.isVisible() is True, "")
             pump(0.6)                         # "3 分钟到了"
             check("★ 满 3 分钟：那一则从记录区里没了", _cards(bubble) == [], repr(_cards(bubble)))
             check("★ 手上那三样跟着作废（正文 / 按钮 / 那一行）",
@@ -153,6 +165,8 @@ def main() -> int:
             check("★ 建议气泡一并收起（口径：无建议气泡）",
                   bubble._offer_row.isVisible() is False and bubble.offer_theme == "",
                   f"visible={bubble._offer_row.isVisible()} theme={bubble.offer_theme!r}")
+            check("★ 承载这一则的聊天窗跟着收起（淡出那条路走完，不留空窗）",
+                  bubble.isVisible() is False, f"visible={bubble.isVisible()}")
             check("普通聊天一条没动（清的是打标的那一则，不是整框）",
                   CHAT_LINE in "\n".join(
                       bubble._history.item(r).text() for r in range(bubble._history.count())),
@@ -166,21 +180,24 @@ def main() -> int:
             bootstrap_mod.CARD_CLEAR_S = shortened
 
         # ---------------------------------------------------------------- S2
-        section("S2 点过「复制回复」的卡片：离开也不清（内容已经取走了）")
+        section("S2 点过「复制回复」的卡片：表撤了、到点也不清（内容已经取走了）")
         copied.clear()
-        _show_card(app)
-        bubble._copy_button.click()           # 走真按钮 → `_on_social_copy`
-        pump(0.05)
-        check("★ 按钮那一下真走到了写剪贴板那只手（记录员收到正文）",
-              copied == [DRAFT], repr(copied))
-        check("★ 复制这一拍就把表停了、并且记下'已取走'",
-              app._card_copied is True and app._card_clear_timer.isActive() is False,
-              f"copied={app._card_copied} active={app._card_clear_timer.isActive()}")
         shortened = _shorten_clear(0.3)
         try:
+            _show_card(app)
+            check("上屏就把表起了（先摆成'在跑'这一档）",
+                  app._card_clear_timer.isActive() is True, "")
+            bubble._copy_button.click()       # 走真按钮 → `_on_social_copy`
+            pump(0.05)
+            check("★ 按钮那一下真走到了写剪贴板那只手（记录员收到正文）",
+                  copied == [DRAFT], repr(copied))
+            check("★ 复制这一拍就把表撤了、并且记下'已取走'",
+                  app._card_copied is True and app._card_clear_timer.isActive() is False,
+                  f"copied={app._card_copied} active={app._card_clear_timer.isActive()}")
             bubble.user_left.emit()           # 复制完之后离开
             pump(0.05)
-            check("★ 已复制的卡片：离开也不起表", app._card_clear_timer.isActive() is False,
+            check("★ 已复制的卡片：离开也不会把表弄回来（撤了就是撤了）",
+                  app._card_clear_timer.isActive() is False,
                   f"active={app._card_clear_timer.isActive()}")
             check("'离开'那一格压根没被置位（复制过的不算离开）",
                   app._card_away is False, f"away={app._card_away}")
@@ -188,75 +205,86 @@ def main() -> int:
             check("★ 满 3 分钟也不清：那一则还在、正文还在按着",
                   len(_cards(bubble)) == 1 and bubble._copy_text == DRAFT,
                   f"{len(_cards(bubble))} 条 / {bubble._copy_text!r}")
+            check("框也还开着（复制过的那一则不清、不收窗）",
+                  bubble.isVisible() is True, f"visible={bubble.isVisible()}")
         finally:
             bootstrap_mod.CARD_CLEAR_S = shortened
 
         # ---------------------------------------------------------------- S3
-        section("S3 离开 → 回到对话窗口 → 停表留卡；再离开才重新计")
-        _show_card(app)
-        shortened = _shorten_clear(0.3)
+        section("S3 离开 → 回来抖动几轮：表一次都不重计（去抖动彻底），到点照样清")
+        shortened = _shorten_clear(1.2)
         try:
-            bubble.user_left.emit()
-            pump(0.05)
-            check("先离开：表起来了", app._card_clear_timer.isActive() is True, "")
-            pump(0.2)                          # 相当于"离开了一分钟"
-            check("离开的这段时间还没到点：卡片照旧在", len(_cards(bubble)) == 1, "")
-            bubble.user_back.emit()            # 回到对话窗口（重新激活）
-            pump(0.05)
-            check("★ 回来就停表、卡片原样留着",
-                  app._card_clear_timer.isActive() is False and len(_cards(bubble)) == 1
-                  and app._card_away is False,
-                  f"active={app._card_clear_timer.isActive()} {len(_cards(bubble))} 条")
-            pump(0.6)
-            check("★ 表停了就是不清：又过了两个'3 分钟'，那一则还在",
-                  len(_cards(bubble)) == 1 and bubble._copy_text == DRAFT,
-                  f"{len(_cards(bubble))} 条")
-            bubble.user_left.emit()            # 再离开
-            pump(0.05)
-            check("★ 再离开是**重新计**（表又跑起来了）",
-                  app._card_clear_timer.isActive() is True and app._card_away is True, "")
-            pump(0.6)
-            check("★ 这一趟满了才清（重新计那条腿真的是活的）",
+            _show_card(app)
+            first = app._card_clear_timer.remainingTime()
+            check("上屏时剩余就是整只表（本模块临时改成 1.2 秒）",
+                  0 < first <= 1200, f"{first}ms")
+            pump(0.3)                          # 相当于"离开了一分钟"
+            marks: list[bool] = []
+            for _ in range(4):                 # 离开 / 回来来回抖四轮（真机 07:52 那几秒）
+                bubble.user_left.emit()
+                pump(0.04)
+                marks.append(app._card_away)
+                bubble.user_back.emit()
+                pump(0.04)
+                marks.append(app._card_away)
+            check("★ 抖动 4 轮：`_card_away` 跟着起落（离开 True、回来 False）",
+                  marks == [True, False] * 4, repr(marks))
+            left = app._card_clear_timer.remainingTime()
+            check("★ 抖动完剩下的时间只会更少、不会往回涨（一次都没重计过）",
+                  0 <= left < first, f"{first}ms -> {left}ms")
+            check("★ 回来之后表照旧在跑（老口径在这儿 stop() 了）",
+                  app._card_clear_timer.isActive() is True
+                  and app._card_clear_timer.interval() == 1200,
+                  f"active={app._card_clear_timer.isActive()} "
+                  f"interval={app._card_clear_timer.interval()}ms")
+            pump(1.2)
+            check("★ 到点算的是**上屏那一刻**：抖动多少轮都拦不住这一次清除",
                   _cards(bubble) == [], repr(_cards(bubble)))
+            check("★ 到点那一下框也收起了", bubble.isVisible() is False,
+                  f"visible={bubble.isVisible()}")
         finally:
             bootstrap_mod.CARD_CLEAR_S = shortened
 
         # ---------------------------------------------------------------- S4
-        section("S4 主要防错点：一直坐在对话窗口看着 —— 远超 3 分钟也不清")
-        _show_card(app)
+        section("S4 口径反转那一处：一直坐在对话窗口看着 —— 满 180 秒照样清、照样收窗")
         shortened = _shorten_clear(0.3)
         try:
-            started = []
-            for _ in range(6):                 # 六个"3 分钟"那么长
-                pump(0.15)
-                started.append(app._card_clear_timer.isActive())
-            check("★ 全程一次都没起过表（用户没离开，计时这条路就不该走）",
-                  not any(started), f"6 次采样：{started}")
-            check("★ 卡片与正文原样都在", len(_cards(bubble)) == 1 and bubble._copy_text == DRAFT,
-                  f"{len(_cards(bubble))} 条 / {bubble._copy_text!r}")
-            check("状态也没被误标成'离开了'", app._card_away is False, "")
-            app._on_card_clear_due()           # 就算有人硬叫一遍超时那一下
-            pump(0.05)
-            check("★ 人在跟前时硬叫超时也不清（`_card_away` 那道闸兜着）",
-                  len(_cards(bubble)) == 1 and bubble._copy_text == DRAFT,
-                  f"{len(_cards(bubble))} 条")
+            _show_card(app)
+            check("★ 人一直在跟前（没离开过）：表照样跑着、这一格也没被误标成'离开了'",
+                  app._card_clear_timer.isActive() is True and app._card_away is False,
+                  f"active={app._card_clear_timer.isActive()} away={app._card_away}")
+            pump(0.6)                          # "3 分钟到了"
+            check("★ 老口径在这儿是'人在跟前不清'；这一版到点就清",
+                  _cards(bubble) == [], repr(_cards(bubble)))
+            check("★ 那一则的手上状态一并作废（正文 / 按钮）",
+                  bubble._copy_text == "" and bubble._copy_button is None,
+                  f"text={bubble._copy_text!r} button={bubble._copy_button}")
+            check("★ 聊天窗也一并收起（人在跟前跟没人看着一样收）",
+                  bubble.isVisible() is False, f"visible={bubble.isVisible()}")
+            check("清完之后状态归位、表也停了",
+                  (app._card_open, app._card_away, app._card_clear_timer.isActive())
+                  == (False, False, False),
+                  f"open={app._card_open} away={app._card_away} "
+                  f"active={app._card_clear_timer.isActive()}")
         finally:
             bootstrap_mod.CARD_CLEAR_S = shortened
 
         # ---------------------------------------------------------------- S5
         section("S5 边界：'离开'那两种判定各自都算数，'回来'得是原来那条单聊")
-        _show_card(app)
-        shortened = _shorten_clear(0.3)
+        shortened = _shorten_clear(30.0)       # 这一节反复进出，先给一只够长的表
         try:
+            _show_card(app)
             bubble.user_back.emit()
             pump(0.05)
             check("先摆回'人在窗口里'这一档", app._card_away is False, "")
             bubble.user_left.emit()            # 甲：宠物浮窗失焦
             pump(0.05)
-            check("★ 甲-1 宠物浮窗失焦 → 算离开（表起来了）",
+            check("★ 甲-1 宠物浮窗失焦 → 算离开（这一格立起来；表是上屏就起的，不归它管）",
                   app._card_away is True and app._card_clear_timer.isActive() is True, "")
             bubble.user_back.emit()
             pump(0.05)
+            check("★ 甲-1b 回来只把这格抹掉、表照走（老口径在这儿 stop）",
+                  app._card_away is False and app._card_clear_timer.isActive() is True, "")
             bubble.close_bubble(fade=False)    # 甲：把对话窗收起（按 × / Esc 那条腿）
             pump(0.05)
             check("★ 甲-2 对话窗被收起 → 也算离开（真收起那条路也报了那一声）",
@@ -264,8 +292,8 @@ def main() -> int:
 
             bubble.open_at(app.pet_window.frameGeometry())
             pump(0.05)
-            check("甲-3 重新展开气泡 → 算回来、停表",
-                  app._card_away is False and app._card_clear_timer.isActive() is False, "")
+            check("甲-3 重新展开气泡 → 算回来（表照走，不重计）",
+                  app._card_away is False and app._card_clear_timer.isActive() is True, "")
 
             app.social_reply.note_page_kind(PAGE_PERSONAL)   # 这一屏仍认得出是那条单聊
             app.screen_monitor.foreground_changed.emit("explorer.exe")
@@ -274,8 +302,8 @@ def main() -> int:
                   app._card_away is True and app._card_clear_timer.isActive() is True, "")
             app.screen_monitor.foreground_changed.emit("wechat.exe")
             pump(0.05)
-            check("★ 乙-2 切回微信、而且仍是那条单聊 → 算回来、停表",
-                  app._card_away is False and app._card_clear_timer.isActive() is False, "")
+            check("★ 乙-2 切回微信、而且仍是那条单聊 → 算回来（表照走，不重计）",
+                  app._card_away is False and app._card_clear_timer.isActive() is True, "")
 
             app.screen_monitor.foreground_changed.emit("explorer.exe")
             pump(0.05)
@@ -285,20 +313,26 @@ def main() -> int:
             app.social_reply.note_page_kind(PAGE_GROUP)       # 认出来的偏偏是群聊那一档
             app.screen_monitor.foreground_changed.emit("wechat.exe")
             pump(0.05)
-            check("★ 乙-3 切回微信、可这一屏认出来**不是单聊** → 不算回来，表照跑",
+            check("★ 乙-3 切回微信、可这一屏认出来**不是单聊** → 不算回来，还是算离开",
                   app._card_away is True and app._card_clear_timer.isActive() is True,
                   f"away={app._card_away} active={app._card_clear_timer.isActive()}")
 
             app.screen_monitor.foreground_changed.emit("")
             pump(0.05)
-            check("乙-4 前台报回宠物自己（空进程名）→ 按'人在框跟前'处理，宁可多留",
-                  app._card_away is False and app._card_clear_timer.isActive() is False, "")
+            check("乙-4 前台报回宠物自己（空进程名）→ 按'人在框跟前'处理",
+                  app._card_away is False, f"away={app._card_away}")
 
+            # 乙-5：换一则新的、表换成 0.3 秒，走一遍"走开 → 到点"这条整腿
+            _shorten_clear(0.3)
+            _show_card(app)
             app.social_reply.note_page_kind(PAGE_PERSONAL)
-            app.screen_monitor.foreground_changed.emit("explorer.exe")
+            app.screen_monitor.foreground_changed.emit("explorer.exe")   # 走开
+            pump(0.05)
+            check("走开这一拍就记上了'没人看着'", app._card_away is True, "")
             pump(0.6)
-            check("★ 乙-5 这几种离开判定最后都能走到'满 3 分钟就清'",
-                  _cards(bubble) == [], repr(_cards(bubble)))
+            check("★ 乙-5 这几种离开判定最后都能走到'到点就清 + 收窗'",
+                  _cards(bubble) == [] and bubble.isVisible() is False,
+                  f"{len(_cards(bubble))} 条 / visible={bubble.isVisible()}")
         finally:
             bootstrap_mod.CARD_CLEAR_S = shortened
 
@@ -340,6 +374,20 @@ def main() -> int:
         check("新代码一次截图、一趟后台任务都不起（这活儿只动界面状态）",
               not ({"grab_chat", "run_async", "_read_social_screen"} & attrs), "")
 
+        # 去抖动那两处（v2-social-card-timeout-absolute）：回来不停表、离开不重计，是从
+        # 源码里就砌死的，不是"看着像没触发"。
+        back_src = inspect.getsource(bootstrap_mod.DesktopPetApp._note_card_back)
+        check("★ `_note_card_back` 里再没有停表 / 重计那一步（去抖动彻底的落点）",
+              ".stop(" not in back_src and ".start(" not in back_src, repr(back_src.strip()[-60:]))
+        left_src = inspect.getsource(bootstrap_mod.DesktopPetApp._note_card_left)
+        check("★ `_note_card_left` 也不再碰那只表了（人离开只记事实）",
+              ".start(" not in left_src and ".stop(" not in left_src, "")
+        due_src = inspect.getsource(bootstrap_mod.DesktopPetApp._on_card_clear_due)
+        check("★ 到点那一下走的是 `close_bubble()`（淡出那条现成的路，不是硬 hide）",
+              "close_bubble()" in due_src and "hide()" not in due_src, "")
+        check("★ 到点那两道闸只剩两道（`_card_open` / `_card_copied`），不再看人在不在",
+              "_card_away" in due_src and "not self._card_away" not in due_src, "")
+
         from life.screen import social as smod
         check("★ 触发闸门 / 按需抓拍的老口径一个没动",
               smod.PENDING_SNAP_MS == 500 and smod.OFFER_HANG_S == 90.0,
@@ -369,7 +417,7 @@ def main() -> int:
         bootstrap_mod.CARD_CLEAR_S = real_clear_s
 
     box.cleanup()
-    return summary("帮聊那一则离开对话窗口满 3 分钟自动清掉（v2-social-card-timeout）")
+    return summary("帮聊那一则上屏满 3 分钟自动清掉（v2-social-card-timeout → -absolute）")
 
 
 if __name__ == "__main__":

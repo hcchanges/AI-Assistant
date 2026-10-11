@@ -382,9 +382,114 @@ def main() -> int:
     check("★ 只给 config / bus 的老桩服务照旧当场冒（`test_social` 那一批靠这条不红）",
           svc7.awaiting_confirm is True, str(svc7.awaiting_confirm))
 
-    # ---------- ⑤ 红线 ----------
+    # ---------- ⑤ 冷却哨兵（v2-social-due-sentinel） ----------
 
-    section("⑤ 红线：零新 import / 两库零写入 / 判定不看颜色")
+    section("⑤ 冷却哨兵：刻度从 0.0 起（= 刚开机）第一次也该冒；被挡掉的那一拍不消费跃迁")
+
+    # 真机根因（2026-10-09）：`_clock` 是 `time.monotonic()`，在 Windows 上就是
+    # `GetTickCount64()`——**开机以来的秒数**。哨兵写 `0.0` 等于说"进程刚起 0 秒那会儿
+    # 冒过一回"，于是开机后头 30 分钟里每一条 offer 都被 `_due()` 静默挡掉（那两场桌宠
+    # 分别开在开机后 15 分钟 / 6 分钟，全程一次都没冒，日志里连一行都没有）。
+    # 上面①～④那一批用例把刻度取在 10_000.0（冷却之后）——照旧留着，那是验闸门的；
+    # 这一节把刻度起在 **0.0**（= 刚开机那一下）单独验哨兵这件事。
+    boot = {"t": 0.0}
+    boot_offers: list[str] = []
+    app.bus.social_offer.connect(boot_offers.append)
+
+    import logging
+
+    class _Grab(logging.Handler):
+        """把社交那条线的日志抄一份下来（只为验"冷却挡下"这一行真的打了）。"""
+
+        def __init__(self) -> None:
+            super().__init__()
+            self.lines: list[str] = []
+
+        def emit(self, record: logging.LogRecord) -> None:
+            try:
+                self.lines.append(record.getMessage() % record.args
+                                  if record.args else record.getMessage())
+            except Exception:      # noqa: BLE001 —— 抄日志失败不该把用例带崩
+                self.lines.append(record.getMessage())
+
+    grab = _Grab()
+    log_social = logging.getLogger("life.screen.social")
+    _old_level = log_social.level
+    log_social.setLevel(logging.DEBUG)      # 那一行是 debug，用例自己把闸放开
+    log_social.addHandler(grab)
+
+    def _new_boot_service() -> SocialReplyService:
+        svc = SocialReplyService(
+            config=app.config, bus=app.bus, clock=lambda: boot["t"],
+            idle_seconds=lambda: 99.0,
+        )
+        svc._social_foreground = True
+        return svc
+
+    check("冷却常数取的就是 30 分钟（`social_cooldown_min`）",
+          max(0, int(app.config.screen.social_cooldown_min)) * 60 == 1800,
+          str(app.config.screen.social_cooldown_min))
+
+    svc9 = _new_boot_service()
+    check("`_last_asked` 的初值是 None（“从没冒过”，不是“刚起 0 秒冒过一回”）",
+          svc9._last_asked is None, repr(svc9._last_asked))
+    check("刚开机（刻度 0.0）`_due()` 直接放行", svc9._due() is True, "")
+    svc9.note_page_kind(PAGE_PERSONAL)
+    check("★ 刚开机第一次从“没认出来”进到单聊 → 冒了（老口径在这儿被冷却静默挡掉）",
+          len(boot_offers) == 1 and svc9.awaiting_confirm is True, f"{len(boot_offers)} 次")
+    check("冒过之后 `_last_asked` 才记上那一刻的刻度",
+          svc9._last_asked == 0.0, repr(svc9._last_asked))
+    boot["t"] = 1799.0
+    check("冷却按真值走：冒过之后 1799 秒还不放行", svc9._due() is False, "")
+    boot["t"] = 1800.0
+    check("满 1800 秒放行", svc9._due() is True, "")
+
+    # 第二半：被挡掉的那一拍**不算消费跃迁**（老口径下它会把页型推进到单聊，此后每一拍
+    # 都是"没变"——这一趟再也别想冒，真机"等两分钟也不弹"有一半就是它黏着）。
+    svc10 = _new_boot_service()
+    boot["t"] = 20_000.0
+    svc10.note_page_kind(PAGE_PERSONAL)
+    check("新一场的第一拍照旧冒（这一刻没有冷却）",
+          len(boot_offers) == 2, f"{len(boot_offers)} 次")
+
+    svc10._awaiting = False
+    svc10.note_page_kind(PAGE_LIST)                 # 回到会话总列表
+    boot["t"] += 60.0                              # 一分钟后点进某个人的单聊（还在冷却里）
+    svc10.note_page_kind(PAGE_PERSONAL)
+    check("★ 冷却里的这一次跃迁没冒", len(boot_offers) == 2, f"{len(boot_offers)} 次")
+    check("冷却挡下这一行打出来了（这条闸原来一声不吭）",
+          any("冷却" in line for line in grab.lines), repr(grab.lines[-3:]))
+    check("没冒成的那一拍把页型格退回空串（“这一屏还没算数”，不等它把跃迁消费掉）",
+          svc10._page_kind == "", repr(svc10._page_kind))
+    check("退回空串不误伤那条只读口径：空串按“默认放行”办，`in_personal_chat` 仍旧算单聊",
+          svc10.in_personal_chat is True, repr(svc10.in_personal_chat))
+
+    boot["t"] += 1800.0                            # 冷却过了，人还在那条单聊上
+    svc10.note_page_kind(PAGE_PERSONAL)
+    check("★ 冷却一过、同一页型再报一次 → 补冒了这一句（老口径在这儿永远不冒）",
+          len(boot_offers) == 3 and svc10.awaiting_confirm is True, f"{len(boot_offers)} 次")
+
+    # 真钟那一路（装配层不传 clock，用的就是 `time.monotonic`）：拿这台机器的实际刻度再
+    # 验一遍哨兵——不管此刻开机多久，"从没冒过"都该放行；反过来，老哨兵（0.0）放不放行
+    # **完全取决于开机时长**（这就是真机那两场为什么一眼看着像"坏在 3b236b1 上"）。
+    import time as _time
+
+    svc11 = SocialReplyService(config=app.config, bus=app.bus)
+    check("装配层那只钟就是 `time.monotonic`（本模块不传 clock 时）",
+          svc11._clock is _time.monotonic, repr(svc11._clock))
+    check("真钟这一拍：从没冒过 → `_due()` 放行（跟开机多久无关）",
+          svc11._due() is True, "开机 %.0f 秒" % _time.monotonic())
+    svc11._last_asked = 0.0                 # 老哨兵：等于说"开机 0 秒那会儿冒过一回"
+    check("老哨兵（0.0）放不放行只看开机时长——`_due()` 就等于“开机满没满 30 分钟”",
+          svc11._due() == (_time.monotonic() >= 1800),
+          "开机 %.0f 秒" % _time.monotonic())
+
+    log_social.removeHandler(grab)
+    log_social.setLevel(_old_level)
+
+    # ---------- ⑥ 红线 ----------
+
+    section("⑥ 红线：零新 import / 两库零写入 / 判定不看颜色")
 
     before = _rows(app.config.db_path, "utterance")
     mind_before = app.mind_store.fragment_count()

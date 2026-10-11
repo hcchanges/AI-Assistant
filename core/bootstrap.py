@@ -107,9 +107,13 @@ from life.screen.social import (
     GUIDE_CARD_GOAL,
     GUIDE_CARD_ICON,
     GUIDE_CARD_TITLE,
+    PAGE_LIST,
+    SOCIAL_ALLOWED_PROCS,
     SocialReplyService,
     classify_chat_page,
-    is_social_proc,
+    is_allowed_social_proc,
+    is_personal_kind,
+    looks_like_list_boxes,
     looks_like_list_page,
 )
 from life.screen.social_examples import SocialExamples
@@ -171,6 +175,18 @@ QUIT_AFTER_REPLY_MS = 1200        # 聊天里说"退出"时，先把它的回话
 # 偷偷写了——写剪贴板这件事只在用户真按下按钮时发生一次）。
 SOCIAL_DRAFT_NO_WHY = "（这条没带解析）"
 
+# ---- 邀请过期那一句交代（v2-social-offer-ui-lifetime）----
+# 真机上那句问句（`SOCIAL_ASK_LINE`）冒出来、90 秒（`OFFER_HANG_S`）内用户没理，按钮
+# 会自己退掉、问句也跟着整条摘走（见 `chat_bubble.clear_offer_ask`）。不交代一声，用户
+# 就看着头顶那句问话凭空消失，不知道是"宠物改主意了"还是"自己点错了"。所以摘完之后
+# 补这一句灰字，把"为什么没了"说清楚。
+#
+# **无条件补（v2-social-offer-expiry-note）**：原来这一句挂在"人还在单聊里"
+# （`in_personal_chat`）后头，可过期那一拍它几乎必为假——90 秒里人早切走了，真机于是成了
+# "问句凭空消失、一个字不交代"。这一句本来就是给"还看着这一问的人"看的，跟此刻前台停在
+# 哪一页无关，所以那一道闸拿掉了。
+OFFER_EXPIRED_NOTE = "（这条邀请过期了，不用管它）"
+
 # ---- 社交"尾巴"诊断（v2-social-leak-mask）----
 # 真机上"编造 / 答非所问"要能一条日志看出因果：采的时候前台是谁、涂掉了自己几块窗、
 # 认完之后喂给模型的**末尾那一句**到底是什么。下面这两个只管日志，不参与任何判断。
@@ -228,6 +244,89 @@ def social_draft_text(draft: str, why: str) -> str:
 
 
 ARCHIVE_CHECK_MS = 6 * 60 * 60 * 1000   # 每 6 小时扫一遍"太久没动"的卡（指令 25-B 第 4 项）
+
+
+# 社交窗标题里哪些值是**应用名**（v2-social-cooldown-by-peer）：独立聊天窗上标题写的是
+# 对方 / 群名，主窗上写的是应用名——名字那一格只认前者。口径跟 `SOCIAL_ALLOWED_PROCS`
+# 一路（认不出就不采）：列不全的一律当"这是个对象名"，宁可退回老键，也不拿应用名去分格。
+_SOCIAL_APP_TITLES = ("微信", "weixin", "wechat")
+
+
+def _strip_unread_count(title: str) -> str:
+    """抹掉标题尾巴上的未读数：「微信(3)」/「微信（3）」/「微信[3]」→「微信」。
+
+    **非抹不可**：主窗标题挂着未读数时，每来一条未读就换一个键——那把 30 分钟的冷却
+    会被自己的未读数一次次顶掉，比不按对象名分格还糟。只认"括号里全是数字"这一种
+    （全角 / 半角 / 方括号），群名里本来就带括号的（「项目（二期）」）原样还回去。
+    """
+    t = (title or "").strip()
+    for op, cl in (("(", ")"), ("（", "）"), ("[", "]")):
+        if t.endswith(cl) and op in t:
+            inner = t[t.rindex(op) + 1:-1].strip()
+            if inner.isdigit():
+                return t[:t.rindex(op)].strip()
+    return t
+
+
+def _band_leftmost_text(rows) -> str:
+    """标题带认出来的一行行 → **最靠左**那一行的字（认不出回空串）。
+
+    v2-social-peer-by-titlebar 的"最左者为谁"：标题带上除了对象名还有装潢——窗上那三个
+    控制按钮、右侧的"更多"，它们的字框都**坐在名字右边**（真机四帧上名字在 x≈166-171，
+    那几个符号在 x≈584 / 621 / 706）。所以按字框左沿取最小那一个，就是名字。
+
+    一行都认不出 / 字框形状对不上 → 空串（调用方当"这一帧没有名字"）。
+    """
+    from life.screen.social_window import box_bounds
+
+    best_x = None
+    best_text = ""
+    for row in (rows or []):
+        try:
+            box, text = row[0], str(row[1])
+        except Exception:      # noqa: BLE001 —— 形状不对的那几行跳过，别把认字那条线带崩
+            continue
+        if not text.strip():
+            continue
+        bounds = box_bounds(box)
+        if bounds is None:
+            continue
+        if best_x is None or bounds[0] < best_x:
+            best_x, best_text = bounds[0], text
+    return best_text
+
+
+def _peer_name_from_band_text(text: str, pet_name: str = "") -> str:
+    """标题带认出来的那一行字 → "这一场是谁"（不像名字的回空串）。v2-social-peer-by-titlebar。
+
+    跟 `_grab_social_chat` 里从**窗口标题**认名字那条口径是同一套（`v2-social-cooldown-by-peer`），
+    只是来源换成了屏上那一行：先压平空白、再抹未读数（同一场里来一条未读就换一行的情形），
+    然后一道一道滤掉"不是名字"的东西：
+
+    - **应用名**（`_SOCIAL_APP_TITLES`）——主窗合并模式下这一条带子上很可能还留着应用名；
+    - **宠物自己**——窗口标题偶尔挂着宠物名，漏进来也不能当成"对方"；
+    - **含「搜索」**——那是搜索框（主窗标题栏右侧常驻一个）；真机上没有搜索态的帧可验，
+      这一条是按"宁可认不出"压的（报告 §183 已注明）；
+    - **太长 / 太短 / 纯数字**——名字最长 24 字（真机那批 1~7 字，留足余量）；一个字不够
+      成一个名字；纯数字是未读角标 / 时间戳。
+
+    都没命中才回那行字。**只回值、不落盘、不进日志**——调用方只记 `len()`。
+    """
+    from life.screen.social_window import tidy_line
+
+    body = tidy_line(text)
+    body = _strip_unread_count(body)
+    if not body or body.lower() in _SOCIAL_APP_TITLES:
+        return ""
+    if pet_name and body == pet_name:
+        return ""
+    if "搜索" in body:
+        return ""
+    if not 2 <= len(body) <= 24:
+        return ""
+    if body.isdigit():
+        return ""
+    return body
 
 
 class DesktopPetApp:
@@ -623,6 +722,30 @@ class DesktopPetApp:
         # "换没换会话"。**不额外读窗口标题**，所以 `foreground_title` 那只手的口径没动；
         # 这一格只活在内存里，不落盘、不进日志（见 `_social_session_id`）。
         self._social_session_hint = ""
+        # 同一个标题里的**对象名**（v2-social-cooldown-by-peer）：冷却 / 帮聊那本账要按
+        # "这一场是谁"分格，可主窗标题写的是应用名（有时还挂个未读数）——拿它当名字，
+        # 主窗里所有单聊会共用一格（真机 10:26-10:40 那几十行"这一场标识 2 字"就是它）。
+        # 这一格只喂那把键，**不进材料、不落盘、不进日志**（服务那边只记 `len()`）。
+        self._social_peer_hint = ""
+        # 主窗那一半（v2-social-peer-by-titlebar）：合并模式下标题就是应用名，对象名只剩屏上
+        # 标题栏那一行可读——那条**取证带**由 `_grab_social_chat` 抓屏那一拍顺手裁下来（只有
+        # 主窗才裁），认字在后台线程的 `_read_social_chat` 里。五格全只活在内存里、不进材料
+        # （带子跟聊天区是两块，见 `social_window.title_band_box`）、不落盘、不进日志：
+        #   · `_social_peer_band`：待认的那条带子（界线程只存一份小图拷贝，**不 OCR**）；
+        #   · `_social_peer_band_hint`：这一场认出来的名字（**只在换场那一拍清空**，
+        #     v2-social-c1-offer-key-jitter——从前是抓屏那一拍无条件清、等后台认回来再填，
+        #     同场里那把键就在「微信|茗风」与「微信」之间来回抖）；
+        #   · `_social_peer_band_seen_md5`：抓屏那一拍看见的带子指纹，**判换场用**
+        #     （合并窗里 `_session_id` 恒是"微信"、不随对象走，只有这条带子会变）；
+        #   · `_social_peer_band_md5` / `_social_peer_band_name`：上一趟**认过字**的带子指纹
+        #     与结果——同一场里每 1.5 秒重认一遍同一条带子纯属白烧那几秒（真机实测一趟
+        #     2.1~4.8 秒）。这一对是**后台认字那条腿自己的缓存**，跟上面判换场那一格
+        #     各存各的、绝不混用。
+        self._social_peer_band_hint = ""
+        self._social_peer_band = None
+        self._social_peer_band_seen_md5 = ""
+        self._social_peer_band_md5 = ""
+        self._social_peer_band_name = ""
         self.social_reply = SocialReplyService(
             config=config,
             bus=self.bus,
@@ -636,6 +759,10 @@ class DesktopPetApp:
             # 「这一场是谁」（v2-social-session-reset）：微信里换会话时前台进程没变，
             # 服务那条"走出社交前台才清场"永远等不到——换成靠"会话标识变了"判。
             session_provider=self._social_session_id,
+            # 「这一场对着谁」（v2-social-cooldown-by-peer）：跟上一行同一个来源（同一个
+            # 标题），区别只在把"这是应用名"那一类滤成空串。不接 / 取不到就回空串——
+            # 服务退回裸会话标识，也就是这把键加名字之前的逐字行为。
+            peer_provider=self._social_peer_id,
             examples_provider=self.social_examples.for_query,
             # 「那排 [好呀] [不用了] 还挂在气泡上吗」（v2-social-await-prime-fix 改动一）：
             # 服务要按界面那边的实况决定"这声作废该不该清旗"。只读界面那一格，不改它。
@@ -799,9 +926,11 @@ class DesktopPetApp:
         self._overlay_was_open = False
         # 「建完卡自动翻开」这条不让位：置位期间 opened 不赶宠物走
         self._focus_keeps_pet = False
-        # 帮聊那一则的 3 分钟清理线（v2-social-card-timeout）：卡片在不在眼前、内容有没
-        # 有被复制走、用户这会儿算不算"离开了对话窗口"——三样都是**当下这一则**的状态，
-        # 换一则（`_start_card_watch`）整套重置。定时器是单发的：只在"用户离开"那一拍起。
+        # 帮聊那一则的 3 分钟清理线（v2-social-card-timeout → v2-social-card-timeout-absolute）：
+        # 卡片在不在眼前、内容有没有被复制走、用户这会儿算不算"离开了对话窗口"——三样都是
+        # **当下这一则**的状态，换一则（`_start_card_watch`）整套重置。定时器单发，**起点是
+        # 卡片上屏那一拍**（绝对 180 秒）：离开 / 回来只记 `_card_away` 这个事实，一个字都不
+        # 改写这只表（老口径"人离开才开始计"，真机上 37 次起表只等到 1 次清零）。
         self._card_open = False
         self._card_copied = False
         self._card_away = False
@@ -879,6 +1008,8 @@ class DesktopPetApp:
         self.chat_bubble.copy_requested.connect(self._on_social_copy)
         # 帮聊那一则的 3 分钟清理线（v2-social-card-timeout）：气泡失焦 / 被收起 = 用户
         # 离开对话窗口，重新被激活 = 回来。两条都只转发事件，界面行为一个字没改。
+        # v2-social-card-timeout-absolute 起，这两声只改 `_card_away` 这个事实——那只
+        # 绝对 180 秒的表是上屏那一刻起的，走开不会提前清、回来也不会往后延。
         self.chat_bubble.user_left.connect(self._on_card_window_left)
         self.chat_bubble.user_back.connect(self._on_card_window_back)
         # 前台换人也是"离开 / 回来"的一条判据：微信还在前台、而且这一屏仍是原来那条
@@ -1220,11 +1351,23 @@ class DesktopPetApp:
         场景这四条线都在用户没开聊天框时触发，`show_offer` 只把按钮排进隐藏的框。这里
         先把框打开、把问句放进对话流，按钮跟着排出来。头顶那句问句收掉，免得和聊天框
         各带一个尖角（见 `open_chat` 的同款做法）。
+
+        **问句按线分流**（v2-social-offer-ui-lifetime）：只有**社交**那条线（`social`）
+        走 `append_offer_ask`、打上 `ROLE_OFFER_ASK`，好在 90 秒超时收按钮那一拍连问句
+        一起摘（那是四条线里唯一有超时的，见 `chat_bubble.ROLE_OFFER_ASK` 的来龙去脉）。
+        其余三线 `append_pet` 不动。这里判**恰好等于 `"social"`**，不用 `startswith`：
+        `social_card`（"要不要建对象攻略卡"那一问）也以 `social` 开头，可它**没有超时
+        腿**——跟着打标记的话，它会被**另一条线**的过期误删（真机场景：帮聊过期 → 把
+        攻略卡那一问也跟着摘走），而且它本来就由 `_on_card_clear_due` 连框一起收，
+        不需要单摘文字。
         """
         pet_rect = self.pet_window.frameGeometry()
         self.pet_window.hide_speech_bubble()
         self.chat_bubble.follow(pet_rect)
-        self.chat_bubble.append_pet(text)
+        if theme == "social":
+            self.chat_bubble.append_offer_ask(text)
+        else:
+            self.chat_bubble.append_pet(text)
         self.chat_bubble.show_offer(theme)
         self.chat_bubble.open_at(pet_rect)
 
@@ -1884,7 +2027,7 @@ class DesktopPetApp:
             social_draft_body(draft), social_draft_note(why), draft
         )
         self.chat_bubble.open_at(pet_rect)
-        # 新的一则上屏：那三样状态归零、表停着（用户就在框跟前，先不计）
+        # 新的一则上屏：那三样状态归零，绝对 180 秒那只表从**这一拍**起跑
         self._start_card_watch()
 
     def _on_social_copy(self, draft: str) -> None:
@@ -1897,46 +2040,57 @@ class DesktopPetApp:
         """
         self._copy_social_draft(draft)
         # 内容被取走了（v2-social-card-timeout）：这一则不再走 3 分钟清除那条路，离开
-        # 窗口也不清——已经粘走的东西留着无害。表一并停掉。
+        # 窗口也不清——已经粘走的东西留着无害。那只**绝对表**在这儿一并撤掉
+        # （v2-social-card-timeout-absolute：撤表就只剩"复制"这唯一一条停表的路）。
         self._card_copied = True
         self._card_away = False
         self._card_clear_timer.stop()
 
-    # ---------- 帮聊那一则：离开对话窗口满 3 分钟就清掉（v2-social-card-timeout） ----------
+    # ---------- 帮聊那一则：上屏满 3 分钟就清掉（v2-social-card-timeout-absolute） ----------
 
     def _start_card_watch(self) -> None:
-        """新卡片上屏：三样状态归零、表停着——**用户就在框跟前，先不计**。
+        """新卡片上屏：三样状态归零，并把**绝对 `CARD_CLEAR_S`** 那只表起上。
 
-        口径里"卡片生成 → 起 3 分钟计时器"落在这儿是**不起表**：生成那一拍气泡刚
-        `open_at`（被激活到前台），用户就在这一则跟前，而这条线的计时只在"人不在"时跑
-        （`_note_card_left`）。换一则也走这儿：上一则的复制标记跟着作废——新的一则又是
-        一段**没被取走**的正文。
+        v2-social-card-timeout-absolute 起，"3 分钟"数的是**这一则在屏幕上活多久**：表就在
+        上屏这一拍起跑（`_show_social_draft` 末尾那条腿），人在不在跟前、走没走开都一样，
+        到点就清。老口径（v2-social-card-timeout）数的是"**人离开的时间**"——只有
+        `_note_card_left` 那一刻才起表、`_note_card_back` 一回来就停，真机上 37 次起表只
+        等到 1 次清零（`logs/pet.log*`：07:52:39 / :41 / :42 / :43 四秒里起了四回）。
+
+        换一则也走这儿：上一则那只表被重新起跑，复制标记跟着作废——新的一则又是一段
+        **没被取走**的正文。
         """
         self._card_open = True
         self._card_copied = False
         self._card_away = False
-        self._card_clear_timer.stop()
+        self._card_clear_timer.start(int(CARD_CLEAR_S * 1000))
+        logger.debug("帮聊那一则上屏：起一只绝对 %.0f 秒的表（人在不在都算数）",
+                     CARD_CLEAR_S)
 
     def _note_card_left(self, why: str) -> None:
-        """用户离开对话窗口：**从这一刻起**计满 `CARD_CLEAR_S`，再离开就重新计。
+        """用户离开对话窗口：**只记一笔**（`_card_away`），那只绝对表照走、不重计。
 
-        两道闸不放行就不计：手上没有卡片（`_card_open`）、内容已经被复制走
-        （`_card_copied`——那是"已经取走了，留着无害"）。重新离开是 `start()` 重来一遍，
-        所以"离开一分钟又回来、再离开"从第二次离开重新数。
+        两道闸不放行就不记：手上没有卡片（`_card_open`）、内容已经被复制走
+        （`_card_copied`——那是"已经取走了，留着无害"）。老口径在这儿 `start()` 重来一遍，
+        "离开一分钟又回来、再离开"从第二次离开重新数——那条抖动重置的路
+        （v2-social-card-timeout-absolute）已经拆了。
         """
         if not self._card_open or self._card_copied:
             return
         self._card_away = True
-        self._card_clear_timer.start(int(CARD_CLEAR_S * 1000))
-        logger.debug("帮聊那一则没人看着了（%s）：开始计 %.0f 秒", why, CARD_CLEAR_S)
+        logger.debug("帮聊那一则没人看着了（%s）：绝对表照走，不重计", why)
 
     def _note_card_back(self) -> None:
-        """用户回到对话窗口：停表，卡片**原样留着**（不是清掉，也不是从头再计）。"""
+        """用户回到对话窗口：只把 `_card_away` 抹掉，那只绝对表**不停、也不重计**。
+
+        这是 v2-social-card-timeout-absolute 跟老口径最要紧的一处差别：回来**不延长**这一则
+        的寿命，绝对 180 秒是硬上限。真要把这一则留下来，动作只有「复制回复」——内容取走了
+        才不走清除那条路（见 `_on_social_copy`）。
+        """
         self._card_away = False
-        self._card_clear_timer.stop()
 
     def _on_card_window_left(self) -> None:
-        """气泡失焦 / 被收起：用户离开对话窗口（v2-social-card-timeout 判据一）。"""
+        """气泡失焦 / 被收起：用户离开对话窗口（离开 / 回来这条判据一）。"""
         self._note_card_left("气泡失焦或被收起")
 
     def _on_card_window_back(self) -> None:
@@ -1955,16 +2109,18 @@ class DesktopPetApp:
         判据二（v2-social-card-timeout）：**微信对话窗口不在前台**也算离开；反过来说，
         用户切回微信、而且这一屏仍是原来那条单聊，才算"回到对话窗口"——切回微信却停在
         群聊 / 会话总列表上，不算回来（口径里"重新激活**且仍在原单聊**"那一句）。
+        v2-social-card-timeout-absolute 起，这一堆判定**只影响 `_card_away` 这个事实**：
+        绝对 180 秒那只表在两边都不动它，人走开不会提前清、人回来也不会往后延。
 
         宠物自己那扇窗在最前时拿到的是空进程名（正常由 monitor 拦下，走不到这儿）：那
-        等于人就在框跟前，按"回来"处理——**宁可多留一会儿，也不误清**。
+        等于人就在框跟前，按"人还在"处理。
         """
         if not self._card_open:
             return
         if not str(proc or "").strip():
             self._note_card_back()
             return
-        if is_social_proc(proc):
+        if is_allowed_social_proc(proc):
             if self._in_original_chat():
                 self._note_card_back()
             else:
@@ -1973,21 +2129,41 @@ class DesktopPetApp:
         self._note_card_left("微信不在前台")
 
     def _on_card_clear_due(self) -> None:
-        """满 3 分钟了：把那则清掉、回到初始聊天态（输入框还在、建议气泡收起）。
+        """满 `CARD_CLEAR_S` 了：把那则清掉、**把这个承载它的聊天窗一并收起**。
 
-        三道闸在这儿**再判一遍**：表是单发的、离开 / 回来路上都 `stop()` 过，正常到不了
-        这儿；但"用户回来又走开"这种抖动下多判一道不会错——多清一张卡片是用户看得见的
-        损失，多等一会儿不是。
+        v2-social-card-timeout-absolute：这只表从上屏那一刻起跑、中途没有任何一条路停过它
+        （唯一一条是「复制回复」），所以到点就是到点——**不看 `_card_away`**，人在跟前看着
+        也清。老口径那三道闸只留两道：手上没卡片（`_card_open`）、内容已经被复制走
+        （`_card_copied`）。`_card_away` 留着只写进日志（"这 180 秒里人在不在"，排查用）。
+
+        收窗用 `close_bubble()`（**淡出**那条现成的路，`ui/chat_bubble.py:355`），不是直接
+        把框藏掉：口径要的是"不留空窗残留"，这只框本来就是给帮聊那一则开出来的，卡片一走
+        框里也没别的可说。顺序是**先清卡、后收框**：`close_bubble` 会报一声 `user_left`
+        （`_on_card_window_left` → `_note_card_left`），而 `_card_open` 在这之前已经放倒，
+        那一声会被门口那道闸挡住，不会反过来又把 `_card_away` 立起来。
+
+        只有一处例外：这 180 秒里**别的线（笔记 / 攻略 / 场景）把按钮排上了这只框**——那这
+        只框眼下承载的是别人那一问，不是"空窗"，收掉它等于替用户把那一问作废（那几条线的
+        按钮只认自己主题，被收掉就再也点不着了）。这种时候只清卡片，框留着。
         """
-        if not self._card_open or self._card_copied or not self._card_away:
+        if not self._card_open or self._card_copied:
             return
         self._card_open = False
+        away = self._card_away
         self._card_away = False
         self.chat_bubble.clear_social_draft()
-        if getattr(self.chat_bubble, "offer_theme", "").startswith("social"):
-            self.chat_bubble.hide_offer()
-        logger.debug("帮聊那一则在没人看着的地方放了 %.0f 秒，清掉它、回到初始聊天态",
-                     CARD_CLEAR_S)
+        theme = getattr(self.chat_bubble, "offer_theme", "")
+        if theme.startswith("social"):
+            self.chat_bubble.hide_offer()      # 帮聊自己那排按钮跟着退休（末尾会报一声）
+            theme = ""
+        logger.debug("帮聊那一则放了绝对 %.0f 秒，清掉它、回到初始聊天态（这期间%s）",
+                     CARD_CLEAR_S, "没人看着" if away else "人就在跟前")
+        if theme:
+            logger.debug("这只框上还挂着别条线的按钮（%s），框不收，免得替用户把那一问作废",
+                         theme)
+            return
+        self.chat_bubble.close_bubble()
+        logger.debug("帮聊那一则的聊天窗跟着收起（不留空窗）")
 
     def _on_social_card_offer(self) -> None:
         """候选列完了：问一句"要不要建对象攻略卡"，把 [好呀] [不用了] 露出来。"""
@@ -2029,25 +2205,33 @@ class DesktopPetApp:
         except Exception as exc:      # noqa: BLE001 —— 见上
             logger.debug("冷启动探前台失败（%s），社交那条线等下一次换前台", exc)
             return
-        if not is_social_proc(proc):
+        if not is_allowed_social_proc(proc):
             # 焦点不是社交软件：再看一眼桌面上有没有可见的社交窗口。
             visible = self._visible_social_proc(monitor)
             if visible:
+                # 可见 ≠ 前台（v2-social-orphan-fix B-1）：老口径把可见进程名直接冒充前台
+                # 喂给 `on_foreground`，它抓不到帧（前台是别的窗口）就撞上"默认放行"，
+                # 空 offer 冒在冷启动那一拍（真机 22:35:51）。现在只把社交这条线置成
+                # "可抓屏态"（`note_visible_social`：立 `_social_foreground`、醒监听），
+                # 不抓屏、不冒 offer——真前台是不是微信交给下一次 `foreground_changed`。
                 logger.debug(
                     "冷启动：焦点在 %r（不是社交软件），但桌面上有可见的社交窗口 %r，"
-                    "社交那条线照它置成可触发态", proc, visible,
+                    "社交那条线只置成可抓屏态、不冒充前台去冒 offer", proc, visible,
                 )
-                proc = visible
+                service.note_visible_social(visible)
+                return
         logger.debug("冷启动探一次前台：%r（社交那条线据此定 _social_foreground）", proc)
         service.on_foreground(proc)
 
     @staticmethod
     def _visible_social_proc(monitor) -> str:
-        """桌面上**可见、没最小化**的社交进程名；一个都没有返回空串。
+        """桌面上**可见、没最小化**、且在 `SOCIAL_ALLOWED_PROCS` 名单里的进程名；
+        一个都没有返回空串。
 
-        只问"有没有"，不挑"是哪一个"：用户同时开着微信和 QQ 时，随便哪一个都够把社交
-        那条线置成可触发态——真正决定"要不要冒话"的是后面那一道抓屏 + 冷却，不是这里
-        挑中的这个进程名（`on_foreground` 只拿它判"算不算社交软件"）。挑第一个就行。
+        只问"有没有"，不挑"是哪一个"：名单里眼下只有微信（`Weixin.exe` / `WeChat.exe`），
+        将来多支持一个工具就可能同时开着两个——随便哪一个都够把社交那条线置成可触发态。
+        真正决定"要不要冒话"的是后面那一道抓屏 + 冷却，不是这里挑中的这个进程名
+        （`on_foreground` 只拿它判"算不算我们支持的社交工具"）。挑第一个就行。
 
         枚举失败 / 不是 Windows / 翻不出进程名，一律当"一个都没看见"，不影响启动。
         """
@@ -2057,7 +2241,7 @@ class DesktopPetApp:
             logger.debug("冷启动枚举可见窗口失败（%s），社交那条线等下一次换前台", exc)
             return ""
         for proc in procs:
-            if is_social_proc(proc):
+            if is_allowed_social_proc(proc):
                 return proc
         return ""
 
@@ -2083,7 +2267,7 @@ class DesktopPetApp:
         仲裁点（置顶聊天窗口时它照常冒话、照常拟候选），专注在前面拦不到它；反过来把
         社交顶到最前，会掀掉「专注要安静」那条钉死的红线。
         """
-        if is_social_proc(getattr(self.screen_monitor, "foreground_proc", "")):
+        if is_allowed_social_proc(getattr(self.screen_monitor, "foreground_proc", "")):
             return True
         sr = getattr(self, "social_reply", None)
         return bool(sr is not None and sr.pending_offer)
@@ -2116,8 +2300,27 @@ class DesktopPetApp:
         走 `hide_offer()` 而不是 `close_bubble()`：只收那一排按钮，用户手上的对话**不动**。
         `hide_offer` 末尾会发 `offer_hidden`，回头又喊一声 `dismiss_offer()`——那时
         `_offer_theme` 已经摘空，服务那边判"按钮确实不显示了"放行，幂等，无害。
+
+        **问句跟着按钮一起走**（v2-social-offer-ui-lifetime）：这一拍起，`social` 那条线的
+        问句不再是无主的历史记录了——它是这一问的一部分，按钮退了就该退，否则真机上留下
+        "一句孤零零的问话 + 一排输入框"，用户当成能打字的对话窗（issue 里那个形态异常）。
+        **先摘问句、再补交代**，顺序不能反：反了就成了"先说过期了、问句还挂在那"。
+
+        **交代无条件补，不再看人在哪一页**（v2-social-offer-expiry-note）：原来这一句
+        挂在"人还在单聊里"（`in_personal_chat`）这道闸后头，可**过期那一拍它几乎必为假**
+        ——90 秒里用户早就切去别处了，真正"还在这一页"的那一拍根本轮不到超时（超时判据
+        是 `_awaiting` 挂了 90 秒没人理）。真机于是成了"问句凭空消失、一个字不交代"。
+        更别扭的是 `is_personal_kind("")` 把空串当单聊（真），而 `_page_kind` 一过
+        列表 / 登录页就不是空串了——同一个判据两头自相矛盾。这一句本来就说给"**还看着
+        这一问的人**"听的，自带交代语义，跟此刻前台停在哪一页无关，所以直接补。
+
+        **只挂在这条路上**：`hide_offer` 的另外五个调用点绝不顺手摘问句（尤其
+        `_on_card_clear_due` 那 3 分钟收窗——那一拍用户可能正低头粘贴，头顶那句是他
+        在回的东西）。点 [好呀] 之后也不摘：问句是那一则草稿的上下文。
         """
         self.chat_bubble.hide_offer()
+        self.chat_bubble.clear_offer_ask()
+        self.chat_bubble.append_note(OFFER_EXPIRED_NOTE)
 
     # ---------- 社交：截屏认对方原话 + 两路范例（v2-social-fewshot） ----------
 
@@ -2295,6 +2498,28 @@ class DesktopPetApp:
         """
         return getattr(self, "_social_session_hint", "")
 
+    def _social_peer_id(self) -> str:
+        """这一场社交窗对着的**那个人叫什么**。**服务现问一次。**两条腿，先后有序。
+
+        1. **屏上标题带认出来的那个名字**（v2-social-peer-by-titlebar，`_social_peer_band_hint`）
+           ——**主窗合并模式**下唯一读得到对象名的地方，有就用它，这条腿压在上面；
+        2. 退回来**窗口标题**那一条（v2-social-cooldown-by-peer，`_social_peer_hint`）——
+           独立聊天窗上标题写的就是对方 / 群名，原样回；主窗上标题写的是应用名
+           （`_SOCIAL_APP_TITLES`，抹掉未读数之后比）→ 回空串。
+
+        两条腿的来源都是"抓屏那一拍**已经读到 / 已经裁下**的东西"，这里**再读一次窗口标题
+        都不会发生**（标题那条腿是装配层那次读的同一个值；带子那条腿是 `_grab_social_chat`
+        当拍裁下的那条取证带）。**抓屏没开 / 还没抓过 / 前台是宠物自己**：两条腿都回空串
+        （最后一种上面早 return 了）。
+
+        **口径**：只回值、不做加工、不留副本；不落盘、不进日志——服务那边只记 `len()`。
+        认不出对象名就回空串，服务把键逐字退回裸 `_session_id`，也就是这一改之前的老行为。
+        """
+        band = getattr(self, "_social_peer_band_hint", "") or ""
+        if band:
+            return band
+        return getattr(self, "_social_peer_hint", "") or ""
+
     def _grab_social_chat(self):
         """社交软件在前台那一拍：截聊天窗那一块 + 转数组。**界面线程调**（只拷内存）。
 
@@ -2322,11 +2547,13 @@ class DesktopPetApp:
         from life.screen import shot
         from life.screen.monitor import _to_numpy
         from life.screen.social_window import (
+            _chat_left,
             chat_area_box,
             chat_client_rect,
             cut_edges_box,
             input_cut_px,
             is_pet_window,
+            title_band_box,
         )
         from monitor import foreground
 
@@ -2345,10 +2572,31 @@ class DesktopPetApp:
             pet_pid=os.getpid(),
             pet_name=self.config.pet.name,
         ):
-            logger.debug("前台就是宠物自己（%s），这一拍不采社交画面", title or "无标题")
-            return None
-        # **前台不是社交软件就不采**（v2-social-input-draft-exclude）。上面那次进程号
-        # 读取顺手判一下就够了，不额外读任何东西。
+            # 不抢前台（v2-social-no-foreground-steal 主修）：点 [好呀] 后气泡把宠物窗顶到
+            # 前台，原来这里 return None 会让抓屏/OCR/起草整条停摆，等用户手动切回微信。
+            # 那一声恰恰是"挂住等切回来"（`_draft_now` 里 `_pending_draft` 已设）——挂住期间
+            # 不重抓、直接用点按前已拍的上一拍整帧继续流水线。只在这"挂住"一种情况复用；
+            # 平时前台是宠物自己、又没有挂住的问，照旧 None（别把宠物窗采成社交画面）。
+            pending = getattr(
+                getattr(self, "social_reply", None), "_pending_draft", None
+            )
+            raw = getattr(self, "_social_raw_image", None)
+            if pending is not None and raw is not None and not raw.isNull():
+                logger.debug(
+                    "前台是宠物自己（%s），但挂着一问等切回，复用上一拍整帧继续",
+                    title or "无标题",
+                )
+                image = raw
+                reused = True
+                proc_name = ""    # 复用那拍进程名不可信，取证闸当作"不是社交进程"
+            else:
+                logger.debug("前台就是宠物自己（%s），这一拍不采社交画面", title or "无标题")
+                return None
+        else:
+            reused = False
+        # **前台不在白名单里就不采**（v2-social-input-draft-exclude 立的这道闸，
+        # v2-social-grab-whitelist 把口径收严）。上面那次进程号读取顺手判一下就够了，
+        # 不额外读任何东西。
         #
         # 为什么非在这儿拦不可：服务里那个 `_social_foreground` 是**采样信号**设的，
         # 而采样隔一阵才问一次——前台切走之后、信号还没到之前的那一两拍，它仍旧是
@@ -2357,41 +2605,99 @@ class DesktopPetApp:
         # 的搜索框认成 `Q 搜索`，宠物照拟一段——日志里那次 `DRAFT source='Q 搜索'`
         # 就是它。这里读的是**当下**的前台，没有那一拍的滞后。
         #
-        # 进程名取不到时不拦（空名认不出是谁）：宁可漏挡，也不把整条线误挡死。
-        proc_name = self._proc_name_of(pid)
-        if proc_name and not is_social_proc(proc_name):
-            logger.debug("前台不是社交软件（%s），这一拍不采社交画面", proc_name)
-            return None
-        # 这一场对着的是谁（v2-social-session-reset）：上面那次标题读取顺手留一份给服务，
-        # 换会话时前台进程不变、只有这一格会变——它就是"换人了"的唯一信号。
-        # **留在这儿是有讲究的**：前台是宠物自己时上面已经 return 了，所以留下的这里
-        # 一定是社交窗自己的标题（独立聊天窗上写的就是对方 / 群名；主窗写的是应用名，
-        # 那种情况顶多"认不出换人"，不会认错人）。跟标题同一条隐私口径：用完即弃、
-        # 不落盘、不进日志。
-        self._social_session_hint = (title or "").strip()
+        # **口径收严（v2-social-grab-whitelist）**：判据由 `is_social_proc`（分类表那
+        # 一层）换成 `is_allowed_social_proc`（白名单）。两件事跟着变：
+        # ① 分类表里别的"社交"（QQ / Telegram / Discord…）也算不上了——抓屏、量聊天区、
+        #    分气泡那一套量尺是照**微信**版面做的，量别的窗口量出来的是一屏杂字；
+        # ② **进程名取不到时不再放行**。老口径是"空名认不出是谁，宁可漏挡"，可漏挡的
+        #    代价是**把不知道是什么的那个前台窗口当聊天窗采下来**——冒出去的是别的
+        #    窗口里的字，比少采一拍糟得多（真机"未登录微信、别的软件在前台，气泡里
+        #    却是那个软件的对话"，走的就是这条空名路）。认不出是谁 = 不采。
+        # 复用上一拍整帧（v2-social-no-foreground-steal）时，这一整段"这一拍前台是谁"
+        # 的侧写与重抓全都跳过：前台是宠物自己，白名单/进程名/标题都不可信，别拿它们
+        # 盖掉上一场留下的 `_social_session_hint` / `_social_peer_hint`；画面也直接用
+        # 上一拍那张（`image` 已经在上面指过去了），不再 `grab_foreground_window`。
+        if not reused:
+            proc_name = self._proc_name_of(pid)
+            if not proc_name or proc_name.lower() not in SOCIAL_ALLOWED_PROCS:
+                logger.debug("前台不在支持的社交工具名单里（%s），这一拍不采社交画面",
+                             proc_name or "（进程名读不出）")
+                return None
+            # 这一场对着的是谁（v2-social-session-reset）：上面那次标题读取顺手留一份给服务，
+            # 换会话时前台进程不变、只有这一格会变——它就是"换人了"的唯一信号。
+            # **留在这儿是有讲究的**：前台是宠物自己时上面已经 return 了，所以留下的这里
+            # 一定是社交窗自己的标题（独立聊天窗上写的就是对方 / 群名；主窗写的是应用名，
+            # 那种情况顶多"认不出换人"，不会认错人）。跟标题同一条隐私口径：用完即弃、
+            # 不落盘、不进日志。
+            self._social_session_hint = (title or "").strip()
+            # 同一个标题顺手留一份给"按对象名分格"那把键（v2-social-cooldown-by-peer）：先抹掉
+            # 未读数（「微信(3)」→「微信」），再判"这是不是应用名"——主窗标题就是应用名，拿它
+            # 当名字等于所有单聊共用一格。宠物自己那个标题上面已经 return 了，这里再兜一道
+            # （窗口标题偶尔挂着宠物名，漏进来也不能当成对象名）。都不命中才留。
+            clean = _strip_unread_count(title)
+            if not clean or clean.lower() in _SOCIAL_APP_TITLES \
+                    or clean == (self.config.pet.name or ""):
+                self._social_peer_hint = ""
+            else:
+                self._social_peer_hint = clean
 
-        masks = self._social_pet_masks()
-        image = shot.grab_foreground_window(
-            self._social_pet_rect(), extra_masks=masks
-        )
-        if image is None:
-            return None
-        # 这一拍到底采的是谁、涂掉了自己几块窗（v2-social-leak-mask 的诊断）。
-        # 真机上"对方那是谁"要能一眼看出来：前台进程名 + 帧尺寸 + 涂白块数。
-        logger.debug(
-            "社交抓屏：前台 pid=%s 进程名=%s（不是宠物自己，是社交软件）| 帧 %dx%d | 涂白 %d 块",
-            pid, proc_name, image.width(), image.height(), len(masks),
-        )
-        # 裁剪前的那一帧留一份（v2-social-leak-dump-debug）：下面 `image` 会被切成聊天区，
-        # 而"漏源"要判的恰恰是**被切掉的那一边**——左侧会话列表有没有入镜。这儿只存一个
-        # **引用**（零拷贝、零转换，这一拍是界面线程，不做任何多余的事），真正落盘在后台
-        # 线程认出 `[草稿` 之后（`_dump_social_leak_frame`）。`image.copy()` 出的是新对象，
-        # 所以这个引用一直指着那张没裁过的。这一帧里有用户的对话内容，只在本机内存与
-        # %TEMP% 里过，用完即弃。
-        self._social_raw_image = image
+            masks = self._social_pet_masks()
+            image = shot.grab_foreground_window(
+                self._social_pet_rect(), extra_masks=masks
+            )
+            if image is None:
+                return None
+            # 这一拍到底采的是谁、涂掉了自己几块窗（v2-social-leak-mask 的诊断）。
+            # 真机上"对方那是谁"要能一眼看出来：前台进程名 + 帧尺寸 + 涂白块数。
+            logger.debug(
+                "社交抓屏：前台 pid=%s 进程名=%s（不是宠物自己，是社交软件）| 帧 %dx%d | 涂白 %d 块",
+                pid, proc_name, image.width(), image.height(), len(masks),
+            )
+            # 裁剪前的那一帧留一份（v2-social-leak-dump-debug）：下面 `image` 会被切成聊天区，
+            # 而"漏源"要判的恰恰是**被切掉的那一边**——左侧会话列表有没有入镜。这儿只存一个
+            # **引用**（零拷贝、零转换，这一拍是界面线程，不做任何多余的事），真正落盘在后台
+            # 线程认出 `[草稿` 之后（`_dump_social_leak_frame`）。`image.copy()` 出的是新对象，
+            # 所以这个引用一直指着那张没裁过的。这一帧里有用户的对话内容，只在本机内存与
+            # %TEMP% 里过，用完即弃。
+            self._social_raw_image = image
         from PySide6.QtCore import QRect
 
-        box = chat_area_box(image, self._screen_dpr())
+        # 主窗那一半的名字（v2-social-peer-by-titlebar）：合并模式下窗口标题恒是应用名，
+        # 上面那条标题腿认不出人——对象名只剩屏上标题栏那一行可读。**只有标题腿空着时才
+        # 裁**（独立聊天窗上标题就是名字，那条腿已经有了，不必多烧一趟 OCR）；裁的是**裁剪
+        # 前那一帧**上的一条窄带（`title_band_box`：左沿同聊天区、下沿逐像素贴着聊天区
+        # 上沿），所以它跟喂给 OCR 的聊天区是两块，名字走这条路**进不了材料**。
+        #
+        # 这一拍是界面线程：只做一次小图 `copy`（几十像素高的一条），**不 OCR、不转数组**
+        # ——认字留在后台线程的 `_read_social_chat`。
+        #
+        # 名字这一格**只在换场那一拍清**（v2-social-c1-offer-key-jitter）：从前是抓屏那一拍
+        # 无条件清空、等后台认回来再填回去（真机一趟 2.1~4.8 秒），于是同一场里那把键在
+        # 「微信|茗风」与「微信」之间来回抖——`_is_helping()` 按前一把盖戳、按后一把来问，
+        # 进了帮聊连着聊就每回合重复冒一次邀请。**同场不许清**：判不出换场就沿用本场上次
+        # 认到的名字。判换场只看**带子自身的指纹变没变**（见 `_peer_band_changed`）。
+        # 这一拍认不出带子（独立聊天窗上标题本就是名字 / 这一带量不出来）→ 这一格该是空的，
+        # 跟从前一样直接清。
+        self._social_peer_band = None
+        # 左沿先量一次（v2-social-no-foreground-steal 消第二趟 `_chat_left`）：`title_band_box`
+        # 与 `chat_area_box` 的左沿本就是同一个 `_chat_left`（标题带那条带子的左沿也贴着它），
+        # 这里先算一次传进去，两条带子共用这一个值——几何逐像素不变，只是把"各量一遍"改成
+        # "量一遍传两边"，省掉每抓一帧的第二趟左沿（那 0.37~0.9s 白卡，界面线程的）。
+        left = _chat_left(image, self._screen_dpr())
+        if not self._social_peer_hint:
+            band = title_band_box(image, self._screen_dpr(), left)
+            if band is not None:
+                band_rect = QRect(*band)
+                if not band_rect.isEmpty():
+                    self._social_peer_band = image.copy(band_rect)
+        if self._social_peer_band is None:
+            self._social_peer_band_hint = ""
+        elif self._peer_band_changed(self._social_peer_band):
+            # 带子跟上一趟抓屏不是同一条 ⇒ 换了会话 ⇒ 上一场那个名字当场作废。**换场必须清**：
+            # 不清就成了茗风的名字挂在阿强头上（本节点最怕的那条串名回归）。
+            self._social_peer_band_hint = ""
+
+        box = chat_area_box(image, self._screen_dpr(), left)
         if box is not None:
             client = QRect(*box)
             if not client.isEmpty():
@@ -2449,8 +2755,9 @@ class DesktopPetApp:
         # 界面线程，只读两个布尔量、**不碰磁盘**（落盘仍旧在后台线程，见 `_read_social_chat`），
         # 跟 `_social_raw_image` 那句"只存一个引用"同一个纪律。
         #
-        # **两半各自的分量照实说**：`is_social_proc(proc_name)` 上面 :2175 已经拦过一道
-        # （那儿的口径是"进程名取不到时不拦"）——写在这儿是把口径写全，顺带把"空进程名"
+        # **两半各自的分量照实说**：`is_allowed_social_proc(proc_name)` 上面那道闸
+        # （v2-social-grab-whitelist 之前是"进程名取不到时不拦"，现在两边都收严成"认不出
+        # 是谁就不采"）已经拦过一道——写在这儿是把口径写全，顺带把"空进程名"
         # 那一种也挡住；`_social_foreground` 那一半是**采样信号**（`SocialReplyService`
         # 自己的 handler 跑完才更新，见 `social.py:746`），而抓屏这条路本来只在它为真时
         # 才走（`_poll_listen` 头一句、`handle_request` 里那句），所以真机上它基本恒为真。
@@ -2461,7 +2768,7 @@ class DesktopPetApp:
         try:
             service = getattr(self, "social_reply", None)
             self._social_dump_frame = bool(
-                is_social_proc(proc_name)
+                is_allowed_social_proc(proc_name)
                 and getattr(service, "_social_foreground", False)
             )
         except Exception:      # noqa: BLE001 —— 这是取证，不该把抓屏那条线带崩
@@ -2479,9 +2786,47 @@ class DesktopPetApp:
         """
         from life.screen.social_window import ChatRead, classify_lines
 
+        # 抓屏那一拍裁下的那条标题带（v2-social-peer-by-titlebar）：**进门先取走并置空**
+        # ——这条带子只属于刚抓的那一帧，认不认、用不用都到此为止，绝不留在格子里等到
+        # 下一帧（下一帧的带子由下一次抓屏重新裁）。列表页那条早退也照此办：带子取走了，
+        # 这一拍不认它（会话总列表上那一行不是"这一场是谁"）。
+        band = getattr(self, "_social_peer_band", None)
+        self._social_peer_band = None
+
         monitor = getattr(self, "screen_monitor", None)
         if monitor is None:
             return ""
+        # ---- 列表页免全文 OCR（v2-social-offer-fast-latency）----
+        # 先只跑**检测**（约零点几秒），字框几何命中"右对齐时间列"就先验成会话总列表：
+        # 这一屏既不该冒 offer、也不进材料，那 2.7 秒的整趟识别整个省掉——而它正是
+        # "切进微信、还没点开单聊"那一拍卡住下一拍的元凶（识别期间 `_chat_reading` 立着）。
+        #
+        # **闸在认字之前，落点跟 16-β 一模一样**：命中时走的仍是"清成空 read"（不
+        # `_tail_context`、不 `_auto_generate`），页型同样记 `PAGE_LIST`，自动与手动两条路
+        # 共用同一份空 read——6aab8da 那道"仅单聊"闸的语义一个字没动，只是把"判列表"
+        # 从认字之后挪到了认字之前。判据与真机读数见 `social.looks_like_list_boxes`。
+        #
+        # **判不出来就照旧认字**：没接检测那双手、形状对不上、认成空屏、检测抛异常，四种
+        # 一律落到下面那条老路上去，一步都不少（漏判零回归，误判才会挡住功能，所以往
+        # 漏判那边压）。
+        try:
+            boxes = monitor.detect_screen_boxes(array)
+        except Exception:      # noqa: BLE001 —— 检测那条腿出岔子就照旧认字，别把线带崩
+            boxes = []
+        width = 0
+        shape = getattr(array, "shape", None)
+        if shape is not None and len(shape) >= 2:
+            try:
+                width = int(shape[1])
+            except Exception:      # noqa: BLE001 —— 量不出宽就当判不出来
+                width = 0
+        if looks_like_list_boxes(boxes, width):
+            logger.debug("这一屏的字框像会话总列表（%d 个右对齐短框），跳过全文识别，这一拍不拟、不进材料",
+                         len(boxes))
+            read = ChatRead()
+            read.page_kind = PAGE_LIST
+            self._log_tail_trace(read)
+            return read
         read = classify_lines(array, monitor.read_screen_lines(array))
         if read.list_draft_rows:
             self._dump_social_leak(array)
@@ -2524,8 +2869,95 @@ class DesktopPetApp:
                          len(read.lines))
             read = ChatRead()
         read.page_kind = page_kind
+        # 认名字（v2-social-peer-by-titlebar）：**摆在页型判完之后，而且只认单聊**。
+        # 三条理由：① 带子认字要烧那几秒（真机一趟 2.1~4.8 秒），群里 / 订阅号 / 列表页
+        # 上那一行根本不是"这一场是谁"，白烧；② 上面那道免 OCR 早退已经把列表页整趟省掉了
+        # （带子也在此列，进门前就被取走）；③ 名字唯一的用途是喂冷却那把键，而"只对单聊
+        # 冒话"本来就是既有闸（`is_personal_kind`），两处口径是同一个。
+        #
+        # 名字**只落到 `_social_peer_band_hint` 那一格**：它是装配层自己的私有格，喂给
+        # `_social_peer_id()`，跟下面这份 `read`（→ `_tail_context` / 材料 / `_auto_generate`）
+        # **结构上不相通**——带子的像素从没进过 `classify_lines` 那个数组，所以名字到不了
+        # `ChatRead.lines` / `raw` / `groups`（那正是 §前身"昵称被当成对方原话"那个坑）。
+        if band is not None and is_personal_kind(page_kind):
+            name = self._social_peer_name_from_band(band)
+            if name:
+                self._social_peer_band_hint = name
         self._log_tail_trace(read)
         return read
+
+    def _peer_band_changed(self, band) -> bool:
+        """这条标题带跟**上一趟抓屏**看见的是不是同一条（v2-social-c1-offer-key-jitter）。
+
+        **界面线程调**，只做一次 md5（那条带子几十像素高，跟从前那次 `image.copy` 同一量级），
+        不 OCR、不落盘、不进日志——指纹只是"同一条 / 不是同一条"这两个字，跟带子上的内容
+        一样属于用户内容，一个字都不记。
+
+        判换场**只能**看带子自身的指纹：合并窗模式下窗口标题恒是应用名，`_session_id` 不随
+        对象走（茗风→阿强它一个字都不变），拿标识变更判换场等于永远判不出换场——上一场的
+        名字就会挂到新一场头上。所以"指纹一样"= 同一场（**不清名字**，本场沿用上次认到的
+        那个），"指纹不一样"= 换了场（调用方清名字，退回裸标识重认）。
+
+        指纹跟后台认字那条腿的缓存（`_social_peer_band_md5`）**各存各的**，两处输入还不同
+        （这里是带子的原始字节、那边是 `_to_numpy` 去过行填充的数组）：界面线程先写认字那
+        一格会把后台的缓存查询**短路**掉，于是新场那一趟"命中缓存"、认回来的成了上一场的
+        名字——那正是本节要防的串名。
+        """
+        import hashlib
+
+        try:
+            fp = hashlib.md5(bytes(band.constBits())).hexdigest()
+        except Exception:      # noqa: BLE001 —— 拿不到像素就没法判，按"没换场"处理（宁可沿用）
+            return False
+        if fp == self._social_peer_band_seen_md5:
+            return False
+        self._social_peer_band_seen_md5 = fp
+        return True
+
+    def _social_peer_name_from_band(self, band) -> str:
+        """那条**标题带**（QImage）→ "这一场是谁"。**后台线程调**（要 OCR，几秒）。
+
+        v2-social-peer-by-titlebar：主窗合并模式下窗口标题恒是应用名，对象名只剩屏上标题栏
+        那一行——这条带子是**唯一**的读法，而它跟喂给 OCR 的聊天区那张图是两块
+        （见 `social_window.title_band_box`），所以名字走这条路进不了材料。
+
+        **一次会话一次**：带子像素的 md5 跟上一趟一样就复用上次认出来的名字、不再烧那几秒
+        ——同一场里每 1.5 秒重认一遍同一条带子是纯白烧（真机实测单独一趟 2.1~4.8 秒）。
+        指纹变了（换了会话 / 标题栏那一行变了）才重认。要"逐帧一模一样"才复用得上，所以
+        那条带子的裁剪几何必须是**同一处算出来的同一个框**（`title_band_box` 是纯函数）。
+
+        认不出 / 那一行不像名字（应用名、搜索框、宠物名、纯数字、太长）一律回空串——服务
+        那边退回裸会话标识，也就是这一改之前的老行为。**只回名字，不落盘、不进日志**
+        （调用方只记 `len()`）。
+        """
+        import hashlib
+
+        from life.screen.monitor import _to_numpy
+
+        array = _to_numpy(band)
+        if array is None:
+            return ""
+        fp = hashlib.md5(array.tobytes()).hexdigest()
+        if fp == getattr(self, "_social_peer_band_md5", ""):
+            return getattr(self, "_social_peer_band_name", "")
+        monitor = getattr(self, "screen_monitor", None)
+        name = ""
+        if monitor is not None:
+            try:
+                rows = monitor.read_screen_lines(array)
+            except Exception:      # noqa: BLE001 —— 这一趟认不出来就当没有名字
+                rows = []
+            name = _peer_name_from_band_text(
+                _band_leftmost_text(rows), self.config.pet.name or ""
+            )
+        self._social_peer_band_md5 = fp
+        self._social_peer_band_name = name
+        # 只记**长度**：这一行是"这一场是谁"的答案，属于用户内容，跟会话标识同一条口径。
+        logger.debug(
+            "社交窗标题带认出这一场是谁：%d 字（%s）",
+            len(name), "这一拍用上了" if name else "没认出来，退回会话标识",
+        )
+        return name
 
     def _dump_social_leak_frame(self, reason: str = "") -> None:
         """把**裁剪前的整帧**落到 `%TEMP%/pet_social_leak_<ts>.png`（v2-social-leak-dump-debug）。
@@ -2618,8 +3050,9 @@ class DesktopPetApp:
     def _proc_name_of(self, pid) -> str:
         """进程号 → 进程名。取不到回空串，绝不抛。
 
-        两处在用：抓屏那行日志（"这一拍采的是谁"），以及 v2-social-input-draft-exclude
-        那道"前台不是社交软件就不采"的闸——闸那边**空串当"认不出"**，放行不拦。
+        两处在用：抓屏那行日志（"这一拍采的是谁"），以及"前台不在白名单里就不采"
+        那道闸（v2-social-input-draft-exclude 立、v2-social-grab-whitelist 收严）——
+        闸那边**空串当"认不出是谁"，不放行**（认不出是谁 = 不采，见那一段的注释）。
         """
         if not pid:
             return ""

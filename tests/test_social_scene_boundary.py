@@ -190,6 +190,13 @@ def main() -> int:
     ocr["read"] = _peer_read([PEER_LINE, PEER_LINE_2])
     grab["frame"] = "FRAME_B"
     service._last_listen_tail = PEER_LINE          # 上一拍认到的尾巴（打底那一次）
+    # v2-social-helping-window（C-1 收窄）：冒问那条腿（要不要帮你回）与自动拟候选那条腿
+    # 是**两条独立的腿**——上面那几句验的是前者（那时必须在窗口外，窗口里就不冒问了），
+    # 从这里往下验的是后者，而自动那条路的前提是"这一场已经进了帮聊窗口"（点过 [好呀] /
+    # 喊过"帮我回"）。真机落戳那一下在 `test_social_continuous.py` ① 里验。这里只借它
+    # 验完"照旧拟"这一步，紧接着就还回去——① 后面那几段还要在窗口**外**重放"再冒一次
+    # 邀请"的对照（窗口里根本不冒问）。
+    service._mark_helping()
     reader_calls["n"] = 0
     service._poll_listen()
     check("★ 对方回新消息 → 这一拍真去认字了（没被 _awaiting 那道 early-return 拦死）",
@@ -201,6 +208,9 @@ def main() -> int:
                     and "寒暄回寒暄，不升级" in draft_bubble_text(app)),
           repr(draft_bubble_text(app)))
     drain_threads()
+    # 上面那一段借窗口验完了，还回去（v2-social-helping-window）：这一节剩下的几组对照
+    # 都要在窗口**外**重放，窗口里不但不自动拟，连邀请都不再冒。
+    service._forget_helping()
 
     # 反向对照：不作废的话，那一拍确实什么都干不了 —— 把"静默"钉成可复现的
     _reset_offer_state()

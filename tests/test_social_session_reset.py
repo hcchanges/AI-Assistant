@@ -81,6 +81,22 @@ def main() -> int:
     service._session_provider = lambda: ident["s"]
     service._examples_provider = lambda query: ""
     service._clock = lambda: clock["t"]
+    # 冒话那道冷却不在这一批用例的射程里（这儿验的是**自动监听 / 换会话**那条线），先按住：
+    # 不按住的话，第一次"非单聊 → 单聊"的跃迁会冒一句邀请，邀请一挂上 `_awaiting`，
+    # `_poll_listen` 后面几拍就全被它挡回去（挡轮询是既有的设计，见它门口那行）——
+    # 连 `_sync_session()` 都轮不到，换会话的清理自然一步都不走。
+    # v2-social-due-sentinel 之前这一格是**靠"开机 30 分钟内一律静默"那道 bug 蒙对的**
+    # ——刻度 1000 秒 < 冷却 1800 秒，`_due()` 一律判"冷却没到"。哨兵一修，这层蒙的
+    # 掩护就没了，得显式按住（跟 test_social_auto 第 473 行那条老规矩一个写法）。
+    #
+    # v2-social-cooldown-per-window 起，按住这件事**不能再靠写 `_last_asked`**：那道冷却
+    # 改成按"这一场是谁"分格记了，而这一批用例**通篇都在换会话**（`ident["s"]` 在
+    # 茗风 / 李四 / 赵六 / 空之间来回换）——写进去只按住当时那一格，换成新那一场，冷却
+    # 立刻又"没冒过"，邀请照挂。而本节恰恰是"换会话"那件事的用例：邀请一挂上 `_awaiting`，
+    # `_poll_listen` 后面几拍全被挡回去，整批失守。
+    # 所以直接按住**那道闸本身**：跟窗口无关，而这一批用例本来就不验它（`_due` 的哨兵
+    # 语义由 test_social_trigger_window.py ⑨/⑪ 专门盯着）。
+    service._due = lambda: False
     service._social_foreground = True
     service._last_fingerprint = None
     service._last_listen_tail = ""
@@ -101,6 +117,15 @@ def main() -> int:
         if unlock:
             service.reset_done()
             service._last_listen_at = 0.0
+        # v2-social-helping-window（C-1 收窄）：自动那条路只在**进了帮聊窗口之后**才出候选
+        # （点过 [好呀] / 喊过"帮我回"）。这一整个模块验的是"已经在帮这一场时，换人那一下
+        # 记忆怎么清"，所以每一拍都先把这一格补上——**不补的话，正反两组都变成"被这扇门
+        # 挡下的"，"换了会话才放行"这条对照就成了空转**（对照组和实验组会一样地不出候选，
+        # 用例照样绿，但它什么都没验）。
+        #
+        # 落的是**眼下这一场**的键（`_cooldown_key()`）；换会话那一拍由 `_poll_listen` 里
+        # 的 `_sync_session` 换键，所以下一拍开头这一句补的正是新那一场——两次落的不是同一格。
+        service._mark_helping()
         probe.reset()
         calls["n"] = 0
         grab["frame"] = frame
@@ -248,7 +273,12 @@ def main() -> int:
     section("④ 不动那排按钮：邀请挂着时这一拍整个跳过，提示清了它才接着跑")
 
     service._awaiting = True
-    service._last_asked = clock["t"]      # 邀请刚冒出来，还没到"挂太久"那条线
+    # 假装邀请是**这一场**刚冒的：值 + "记在哪一格"两样一起写（跟 `_ask_offer` 落戳那一刻
+    # 同款，v2-social-cooldown-per-window）。只写值不写 `_asked_key` 的话，`_drop_stale_offer`
+    # 会去 `_asked_key` 那一格（还是空串）取，取不到就当场 return False——这一节想验的
+    # "还没到挂太久那条线"就变成了蒙对。
+    service._last_asked = clock["t"]
+    service._asked_key = service._cooldown_key()
     service._last_draft_source = "哨兵材料"
     ident["s"] = "赵六"
     _poll("F11", [(SENDER_OTHER, "在吗")], unlock=False)

@@ -423,6 +423,13 @@ def main() -> int:
         service._read_chat = app._read_social_chat      # 真的那一只：闸就在它里面
         service._idle_seconds = lambda: 10.0
         service._clock = lambda: clock["t"]
+        # 冒话那道冷却不在这一批用例的射程里（这儿验的是**自动监听**那条线），先按住：
+        # 不按住的话，第一次"非单聊 → 单聊"的跃迁会冒一句邀请，邀请一挂上 `_awaiting`，
+        # `_poll_listen` 后面几拍就全被它挡回去（挡轮询是既有的设计，见它门口那行）。
+        # v2-social-due-sentinel 之前这一格是**靠"开机 30 分钟内一律静默"那道 bug 蒙对的**
+        # ——刻度 1000 秒 < 冷却 1800 秒，`_due()` 一律判"冷却没到"。哨兵一修，这层蒙的
+        # 掩护就没了，得显式按住（跟 test_social_auto 第 473 行那条老规矩一个写法）。
+        service._last_asked = clock["t"]
         service._examples_provider = lambda query: ""
         service._social_foreground = True
         service._last_fingerprint = None
@@ -431,6 +438,10 @@ def main() -> int:
         service._last_listen_at = 0.0
         service._running = False
         service._awaiting = False
+        # v2-social-helping-window（C-1 收窄）：自动那条路只在**进了帮聊窗口之后**才出候选
+        # （点过 [好呀] / 喊过"帮我回"）。本节验的是"总列表那一屏被闸挡下、切回聊天窗还照拟"，
+        # 所以先把这一格填上（真机落戳那一下在 `test_social_continuous.py` ① 里验）。
+        service._mark_helping()
         service._done = False
         service._last_read_lines = set()
 

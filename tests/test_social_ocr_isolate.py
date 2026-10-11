@@ -240,6 +240,7 @@ def main() -> int:
 
         real_title, real_pid = fg_mod.foreground_title, fg_mod.foreground_pid
         real_grab = shot_mod.grab_foreground_window
+        real_name = app.screen_monitor._pids.name_of
         grabbed: list = []
 
         def _fake_grab(pet_rect=None, window_rect=None, extra_masks=None):
@@ -254,6 +255,10 @@ def main() -> int:
             import os as _os
             fg_mod.foreground_pid = lambda: _os.getpid()
             shot_mod.grab_foreground_window = _fake_grab
+            # 进程名这一格现在也过白名单（v2-social-grab-whitelist）：pid 4242 在本机读不出
+            # 名字 → `_proc_name_of` 回空串 → "认不出是谁就不采"。这一节要验的正是
+            # "前台是微信 → 照采"，所以把名字照实桩成微信（`pids.name_of` 是唯一来源）。
+            app.screen_monitor._pids.name_of = lambda pid: "weixin.exe"
             grabbed.clear()
             check("前台是宠物自己（进程号）→ 不采",
                   app._grab_social_chat() is None and not grabbed, f"抓了 {len(grabbed)} 次")
@@ -279,6 +284,7 @@ def main() -> int:
         finally:
             fg_mod.foreground_title, fg_mod.foreground_pid = real_title, real_pid
             shot_mod.grab_foreground_window = real_grab
+            app.screen_monitor._pids.name_of = real_name
             app.chat_bubble.hide()
             app.pet_window.hide()
 
@@ -516,6 +522,7 @@ def main() -> int:
 
         real_grab = shot_mod.grab_foreground_window
         real_title, real_pid = fg_mod.foreground_title, fg_mod.foreground_pid
+        real_name = app.screen_monitor._pids.name_of
         real_dpr = app._screen_dpr
         try:
             app._screen_dpr = lambda: DPR
@@ -536,6 +543,7 @@ def main() -> int:
             )
             fg_mod.foreground_title = lambda: "微信"      # 不是宠物自己
             fg_mod.foreground_pid = lambda: 4242
+            app.screen_monitor._pids.name_of = lambda pid: "weixin.exe"   # 过白名单（同上）
 
             frame = app._grab_social_chat()
             # "只切底部"那条老路的高度：底部那一刀在 15-X 之后走 `input_cut_px`
@@ -557,6 +565,7 @@ def main() -> int:
             app._screen_dpr = real_dpr
             shot_mod.grab_foreground_window = real_grab
             fg_mod.foreground_title, fg_mod.foreground_pid = real_title, real_pid
+            app.screen_monitor._pids.name_of = real_name
 
         # ---------- ② 发言者区分 ----------
 
@@ -718,6 +727,13 @@ def main() -> int:
         check("第一拍只打底（还没来新消息就不拟）", not candidates, f"{len(candidates)} 组")
 
         # 对方回了新的一条：画面变了、末尾是白气泡 → 直接拟
+        #
+        # v2-social-helping-window（C-1 收窄）：自动那条路只在**进了帮聊窗口之后**才出候选
+        # （点过 [好呀] / 喊过"帮我回"）。本节验的是"进去之后拿到的上下文里没有自己那句"，
+        # 所以在这里落一戳（真机落戳那一下在 `test_social_continuous.py` ① 里验）。
+        # **摆在打底那一拍之后**：会话标识是打底那一拍才从窗口标题里读出来的
+        # （`_sync_session`），这会儿键才定下来。
+        service._mark_helping()
         stub.prompts.clear()
         candidates.clear()
         frame["v"] = "FRAME_B"

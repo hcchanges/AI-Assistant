@@ -131,6 +131,10 @@ def main() -> int:
         service._last_offered = 0.0
         service._last_draft_source = ""
         service._pending_auto_source = ""
+        # v2-social-helping-window：帮聊窗口也翻篇——docstring 说的就是"刚切进微信、什么都
+        # 没冒"的那一刻，那一刻当然还没点过 [好呀]。① 点过那一下之后这一格会立起来
+        # （那一场从此不再冒问），不在这儿翻掉的话，③④⑤⑥ 这几节要验的邀请一个都冒不出来。
+        service._forget_helping()
         service.reset_done()
         app.chat_bubble.hide_offer()
         app.chat_bubble.set_busy(False)

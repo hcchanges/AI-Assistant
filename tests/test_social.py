@@ -545,6 +545,13 @@ def main() -> int:
             service._awaiting = False
             service._card_awaiting = False
             service._last_asked = 0.0
+            # v2-social-helping-window：本节这一批验的是**冒话那一问**（"要不要帮你回"）。
+            # 点了 [好呀]、或者喊过一句"帮我回"，这一场就算进了帮聊窗口，之后不再冒问——
+            # 那是新口径，S1~S3 里正是这么点过头的。而这一整个模块共用同一个服务实例、
+            # 会话标识一直是空串（`_session_id == ""`），所以那一次点头在真机上本该随手切窗
+            # 作废的，在这里会一直留着。用例要验的是"刚切到微信、还没答应过什么"的那一拍，
+            # 所以这里把窗口状态摆回去——不摆的话 S4-① 的邀请压根不会冒，后面全塌。
+            service._forget_helping()
             probe.reset()
             app.chat_bubble.hide_offer()
             app.chat_bubble.set_busy(False)

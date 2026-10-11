@@ -91,6 +91,18 @@ SPEAKER_NOTE = "note"
 # 按文本挑会误伤真聊天。
 ROLE_SOCIAL_DRAFT = Qt.UserRole + 2
 
+# 社交那条线冒的那句问句（v2-social-offer-ui-lifetime）：`social` 线的邀请是**唯一有
+# 超时**的一条——`OFFER_HANG_S`（90 秒）一到，`_drop_stale_offer` 就把那排按钮收掉
+# （真机 00:28 那一拍：用户切回微信 1.6 秒后按钮就退了）。可头顶那句问句是 `append_pet`
+# 放进对话流的**普通聊天记录**，没人管它——于是真机上留下"孤零零一句『聊天么？要不要我
+# 帮你回呀？』+ 底下一排输入框"，用户以为那是个能打字的对话窗，就自己动手打了"好呀"，
+# 而那条路根本不是入口（issue：offer 气泡形态异常）。这里给问句单独打一格标记，好让
+# "按钮退休"那一拍顺手把问句也整条摘掉，两条寿数对上。
+#
+# **只给社交那条线打**：别的三线（`scene_*` / `game` / `social_card`）没有超时这条
+# 路，问句与按钮本来就不会脱节，给它们加"文字会消失"是新行为（见 `_pop_offer` 分流）。
+ROLE_OFFER_ASK = Qt.UserRole + 3
+
 # 帮聊那一则套的那个框（v2-social-chat-ui-fix2 提交F）：**外粗内细**两层框。
 #
 # 真机上用户要一眼分清"哪句是能直接粘走的、哪句是给我看的门道"——所以正文单独关进内层
@@ -394,6 +406,17 @@ class ChatBubble(QWidget):
         self._append(text, SPEAKER_NOTE)
         self.set_busy(False)
 
+    def append_offer_ask(self, text: str) -> None:
+        """问句那一则（v2-social-offer-ui-lifetime）：**外观与 `append_pet` 逐字同款**
+        （同一个说话人、同样 `set_busy(False)`），只是多打一格 `ROLE_OFFER_ASK`，好让
+        按钮退休时 `clear_offer_ask()` 按这格把它整条摘掉。
+
+        `role` 那一格是 `_append` 现成就有的（批次11 加的），此前一直没人用——这句问句
+        正是它等着的第一个客人。
+        """
+        self._append(text, SPEAKER_PET, role=ROLE_OFFER_ASK)
+        self.set_busy(False)
+
     # ---------- 帮聊那一则（v2-social-chat-ui-copy 批次11 → fix2 提交F 起套框） ----------
 
     def append_social_card(self, body: str, note: str, draft: str) -> None:
@@ -572,6 +595,31 @@ class ChatBubble(QWidget):
         self._copy_button = None
         if removed:
             self._fit_height()
+
+    def clear_offer_ask(self) -> None:
+        """把**刚过期那一句**问句整条摘掉（v2-social-offer-ui-lifetime → v2-social-offer-expiry-note）。
+
+        与 `clear_social_draft` 同一套路数：**认这一格 item data，不认文本**——问句文本
+        （`SOCIAL_ASK_LINE`）用户自己也可能是打的，按文本挑会误伤真聊天；倒着走是因为
+        `takeItem` 会挪动后面的行号。幂等：没有这格就什么都不做。
+
+        **只摘最近那一则（v2-social-offer-expiry-note）**：原来是把**表里所有**
+        `ROLE_OFFER_ASK` 一扫而空，于是"点 [好呀] 之后留作这一则草稿上下文的那句问句"
+        也一并被摘掉——那不是这一拍要收的那一则。这一拍过期的只是**当前这一问**，
+        而它必然是**最后**冒出来的那一则（`_awaiting` 同一时刻只有一个，见
+        `social._drop_stale_offer`），所以倒着走**摘第一个命中的就停**：既摘对了那一则，
+        又把更早那几则（上下文）原样留着。
+
+        **只在"邀请过期"那一拍调**（`_on_social_offer_expired`），别的收按钮的路都不调：
+        用户自己打字时（`_on_chat_send`）把头顶那句删掉，他就找不到自己在回什么了；点
+        [好呀] 之后更得留着——那是这一则草稿的上下文。见 `hide_offer` 的六个调用点。
+        """
+        for row in range(self._history.count() - 1, -1, -1):
+            item = self._history.item(row)
+            if item is not None and item.data(ROLE_OFFER_ASK):
+                self._history.takeItem(row)
+                self._fit_height()
+                return
 
     def set_busy(self, busy: bool) -> None:
         self._busy = busy

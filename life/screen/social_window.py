@@ -968,7 +968,7 @@ def _chat_left(image, dpr: float = 1.0) -> int:
     return left
 
 
-def chat_area_box(image, dpr: float = 1.0) -> tuple[int, int, int, int] | None:
+def chat_area_box(image, dpr: float = 1.0, left: int | None = None) -> tuple[int, int, int, int] | None:
     """一帧窗口画面 → "聊天消息列表"那一块 `(x, y, w, h)`。Qt 无关（不 import Qt）。
 
     左边界先走像素法（`detect_chat_left`），找到了就用它——这样靠左的对方气泡一个字
@@ -977,19 +977,63 @@ def chat_area_box(image, dpr: float = 1.0) -> tuple[int, int, int, int] | None:
 
     "找不到时切哪儿"这一档在 `_chat_left`（甲：有会话列表列才按版面切，单页视图放弃左切）。
 
+    `left` 传了就用传进来的（调用方可能已经算过一份 `_chat_left`，跟标题带那一条
+    共用，省一趟重算）；不传才在内部量。两者结果一模一样——`left` 非 None 时 `_chat_left`
+    一次都不跑。
+
     量不出来（画面是空的、形状对不上）给 None——调用方就当没裁，别硬算。
     """
     width, height = _image_size(image)
     if width <= 0 or height <= 0:
         return None
     scale = _scale(dpr)
-    left = _chat_left(image, dpr)
+    if left is None:
+        left = _chat_left(image, dpr)
     top = int(TITLE_BAR_PX * scale)
     right = width - int(RIGHT_PAD_PX * scale)
     bottom = height - input_cut_px(image, dpr)
     if (right - left) < CHAT_MIN_SIDE or (bottom - top) < CHAT_MIN_SIDE:
         return None            # 切了也没剩什么，交给调用方原样用
     return (left, top, right - left, bottom - top)
+
+
+# 标题带（v2-social-peer-by-titlebar）：`chat_area_box` 的上沿（`TITLE_BAR_PX` × dpr）是照
+# "消息区从哪儿开始"拍的，可**联系人名那一行就在它的上面**——主窗合并模式下窗口标题恒是
+# 应用名，名字只剩屏上这一处可读。所以另开一条**只读的取证带**：跟聊天区同一个左沿、同一条
+# 右沿，高度从裁剪上沿往上量 `TITLE_BAND_PX`。
+#
+# **它不是版面数**：不参与任何裁剪决策，也不是"标题栏有多高"那个意思（那个是
+# `TITLE_BAR_PX`）。它是**多切出来的**那一条，专门给"认名字"那一趟看，跟喂给 OCR 的聊天区
+# 那张图是两块。
+TITLE_BAND_PX = 34
+
+
+def title_band_box(image, dpr: float = 1.0, left: int | None = None) -> tuple[int, int, int, int] | None:
+    """一帧窗口画面 → 标题栏里那一行"对象名"的**取证带** `(x, y, w, h)`。Qt 无关。
+
+    几何跟 `chat_area_box` **同一条版面**，只把上沿往上抬 `TITLE_BAND_PX`：左 `_chat_left`
+    （挡住会话列表那一列——那列里全是别人的名字和预览，绝不进这条带子）、右 `RIGHT_PAD_PX`、
+    下沿就是 `chat_area_box` 的上沿（`TITLE_BAR_PX` × scale），高 `TITLE_BAND_PX` × scale。
+
+    底下那一条是**有意贴着切的**：下沿跟聊天区上沿**逐像素对齐**，这条带子跟聊天区之间不留
+    缝也不重叠，所以"名字有没有混进材料"是几何上就成立的（带子里的像素一个都不在
+    `chat_area_box` 里）。左沿同理，紧贴 `_chat_left` 起。
+
+    `left` 传了就用传进来的（跟 `chat_area_box` 共用同一份，省一趟重算）；不传才在内部量。
+
+    量不出来（画面是空的 / 切完没有面积）给 None——调用方就当这一帧没有名字，别硬算。
+    """
+    width, height = _image_size(image)
+    if width <= 0 or height <= 0:
+        return None
+    scale = _scale(dpr)
+    cut = max(0, min(int(TITLE_BAR_PX * scale), height))    # `chat_area_box` 的上沿
+    top = max(0, cut - int(TITLE_BAND_PX * scale))
+    left = max(0, min(int(left if left is not None else _chat_left(image, dpr)), width))
+    right = max(0, min(width - int(RIGHT_PAD_PX * scale), width))
+    if right - left < 1 or cut - top < 1:
+        return None
+    return (left, top, right - left, cut - top)
 
 
 def cut_edges_box(image, dpr: float = 1.0) -> tuple[int, int, int, int] | None:
@@ -1584,12 +1628,13 @@ __all__ = [
     "RIGHT_PAD_PX", "SAFE_FLOOR",
     "SELF_BUBBLE_RGB", "SELF_GREEN_MARGIN", "SELF_GREEN_MIN", "SELF_GREEN_RGB",
     "SELF_LUMA_MIN", "SENDER_OTHER", "SENDER_UNKNOWN", "SENDER_USER", "SIDEBAR_PX",
-    "TEXT_LUMA_MAX", "TITLE_BAR_PX", "as_chat_read", "bottom_cut_px", "box_bounds",
+    "TEXT_LUMA_MAX", "TITLE_BAND_PX", "TITLE_BAR_PX", "as_chat_read", "bottom_cut_px",
+    "box_bounds",
     "bubble_rgb",
     "chat_area_box", "chat_client_rect", "classify_lines", "cut_edges_box",
     "detect_chat_left", "detect_input_top", "has_chat_list_column", "input_cut_px",
     "group_rows", "is_chat_list_draft", "is_other_bubble", "is_pet_window", "is_self_bubble",
     "looks_like_chat_list",
     "parse_ocr_lines",
-    "sender_from_bubble", "tidy_line", "tidy_lines",
+    "sender_from_bubble", "tidy_line", "tidy_lines", "title_band_box",
 ]

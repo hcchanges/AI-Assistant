@@ -24,8 +24,9 @@
   用户那一趟就够，不必点第二次。
 - **挂住期间自己看前台**（`PENDING_SNAP_MS` = 500 毫秒一拍）：社交窗一回来立刻
   抓一屏，不再等前台采样那 5 秒那一拍。抓不成（前台还是宠物自己）当场 return None，
-  几乎不耗；同一屏认过了就不再烧一趟 OCR（指纹闸）；既有的自动轮询计时器活着时
-  让给它（那边带一整套纪律），这条腿只在"轮询没在跑、而这一问还挂着"时出力。
+  几乎不耗；同一屏认过了就不再烧一趟 OCR（指纹闸）。**有挂问优先**（v2-social-orphan-fix
+  B-2）：轮询计时器活着时这条腿也不让位——老口径让位后那一问整个让给监听腿，而监听
+  腿认完字不回头收挂问（`_on_listen_read` 不 `_drain_pending`），那一问就孤儿化了。
 
 红线：不动"仅单聊"那道触发闸（v2-social-trigger-window-gate）；不动 16-β；
 不破坏首启 / 切窗那条后台抓拍路（批次17 甲的空载保护照旧：真抓不到才说"没读到"）；
@@ -280,9 +281,9 @@ def main() -> int:
               _hints() == 1 and candidates == [] and stub.prompts == [],
               f"{_hints()} / {len(candidates)} 组 / {len(stub.prompts)} 条")
 
-        # ---------- ⑤ 让给既有轮询：那条腿活着时这条不出手 ----------
+        # ---------- ⑤ 有挂问优先：轮询在跑时这条腿也不让位 ----------
 
-        section("⑤ 既有的自动轮询计时器活着时，这条腿让给它（不叠两拍）")
+        section("⑤ 挂问优先：轮询在跑时这条腿也不让位（v2-social-orphan-fix B-2）")
 
         _reset()
         service._pending_draft = ""
@@ -294,12 +295,12 @@ def main() -> int:
         service._snap_pending = lambda: seen.__setitem__("n", seen["n"] + 1) or True
         try:
             service._poll_pending_snap()
-            check("★ 轮询在跑：这条腿这一拍不抓（让给它，不叠两拍）",
-                  seen["n"] == 0, f"{seen['n']} 次")
+            check("★ 轮询在跑也不让位（挂问优先，这一拍照样抓）",
+                  seen["n"] == 1, f"{seen['n']} 次")
             service._listen_timer.stop()
             service._poll_pending_snap()
-            check("★ 轮询停了（自动监听关着 / 还没进前台）：这条腿接着看",
-                  seen["n"] == 1, f"{seen['n']} 次")
+            check("★ 轮询停了照样接着看",
+                  seen["n"] == 2, f"{seen['n']} 次")
         finally:
             service._snap_pending = real_snap
 
@@ -311,7 +312,8 @@ def main() -> int:
               "PENDING_SNAP_MS" in smod.__all__ and PENDING_SNAP_MS == 500,
               str(PENDING_SNAP_MS))
         check("★ 跟那一问同寿的那条线没动（90 秒）", OFFER_HANG_S == 90.0, str(OFFER_HANG_S))
-        check("★ 既有轮询那 1.5 秒没动", LISTEN_POLL_MS == 1500, str(LISTEN_POLL_MS))
+        check("★ 轻量轮询那一格（v2-social-offer-fast-latency 起 500）",
+              LISTEN_POLL_MS == 500, str(LISTEN_POLL_MS))
         check("★ 新鲜期那道帘子没动（120 秒）", CHAT_TEXT_FRESH_S == 120.0,
               str(CHAT_TEXT_FRESH_S))
         check("★ 两道冷却常量没动（8 秒 / 20 秒）",
