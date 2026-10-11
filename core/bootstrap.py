@@ -187,6 +187,20 @@ SOCIAL_DRAFT_NO_WHY = "（这条没带解析）"
 # 哪一页无关，所以那一道闸拿掉了。
 OFFER_EXPIRED_NOTE = "（这条邀请过期了，不用管它）"
 
+# ---- 起草时"对方这个人"这一格塞多少（v2-social-card-inject）----
+# 这一格是**背景料**不是主体：塞多了会盖过"对方刚说了什么"这条主线，还会把提示词撑长。
+# 碎片只取最近几条、每条截断；画像 / 关系总述各只一句。
+PEER_PROFILE_FRAGMENTS = 3          # 最近几条碎片
+PEER_PROFILE_CLIP = 40              # 每条碎片截到多少字
+# 画像各格在提示词里的中文名（`life/mind/store.py::_PROFILE_FIELDS` 那五项）。
+_PEER_PROFILE_LABELS = (
+    ("name", "叫"),
+    ("gender", "性别是"),
+    ("occupation", "做"),
+    ("family", "家里"),
+    ("intro", "情况是"),
+)
+
 # ---- 社交"尾巴"诊断（v2-social-leak-mask）----
 # 真机上"编造 / 答非所问"要能一条日志看出因果：采的时候前台是谁、涂掉了自己几块窗、
 # 认完之后喂给模型的**末尾那一句**到底是什么。下面这两个只管日志，不参与任何判断。
@@ -780,6 +794,10 @@ class DesktopPetApp:
         # 也不再重复建。判据现问做卡那个模块（每次调用都查一遍库），社交这条线自己不存
         # 这份记忆——用户可能是在卡界面里自己建的那一张，存一份就会跟真值对不上。
         self.social_reply.set_card_exists_provider(self._guide_card_exists)
+        # 「关于对面这个人，我们这边记着什么」（v2-social-card-inject）：起草那趟按**对象名**
+        # 从三记忆库里取属于这个人那一格当背景料。检索在记忆模块那边，社交这条线不碰库；
+        # 每次现问（回调），所以刚聊出来的碎片下一拍就能用上。**纯读。**
+        self.social_reply.set_peer_profile_provider(self._peer_profile_for)
         self.social_reply.attach(self.screen_monitor)
         # 这里原来立着候选框的单例句柄（v2-social-ocr-isolate ④）。候选框整个删掉了
         # （v2-social-copy-clean），句柄跟着没有存在的理由：现在没有框可开、没有第二个
@@ -2344,6 +2362,43 @@ class DesktopPetApp:
         return self.card_service.find_card(
             CARD_CATEGORY, GUIDE_CARD_TITLE
         ) is not None
+
+    def _peer_profile_for(self, peer: str) -> str:
+        """关于**对面这个人**，我们这边记着什么（v2-social-card-inject）。
+
+        收一个对象名，回一句能直接进提示词的档案——**只取这一格**（`MindStore` 的
+        `peer=` 那一维）：画像（叫 / 性别是 / 做 / 家里 / 情况是）、关系总述（眼下关系）、
+        最近几条碎片。取不到（没这个人 / 那一格是空的 / 记忆模块没装）就回空串，社交
+        那边整格不填——**宁可不注入，也别把主人那一档端出来当"对方"**。
+
+        为什么在这儿、而不是在社交那个模块里直接读库：社交这条线**一个库都不碰**
+        （见 `SocialReplyService` 开头的口径），分格坐标 `_peer_key` 也在记忆模块里；
+        接一个回调出去，跟 `_guide_card_exists` / `_offline_candidates_provider` 同一套。
+        **纯读，不写**。
+        """
+        store = self.mind_store
+        if store is None or not (peer or "").strip():
+            return ""
+        bits: list[str] = []
+        try:
+            who = store.profile(peer=peer) or {}
+            facts = [f"{label}{who[key]}" for key, label in _PEER_PROFILE_LABELS if who.get(key)]
+            if facts:
+                bits.append("、".join(facts))
+            rel = str((store.ep(peer=peer) or {}).get("rel_state") or "").strip()
+            if rel:
+                bits.append(f"眼下关系：{rel}")
+            frags = [
+                str(row.get("text") or "").strip()[:PEER_PROFILE_CLIP]
+                for row in store.fragments(limit=PEER_PROFILE_FRAGMENTS, peer=peer)
+            ]
+            frags = [f for f in frags if f]
+            if frags:
+                bits.append("最近记下的：" + "；".join(frags))
+        except Exception as exc:      # noqa: BLE001 —— 见上：辅助料不该挡住起草
+            logger.debug("对象档案取不出来（%s），这一格不摆", exc)
+            return ""
+        return "；".join(bits)
 
     def _to_physical(self, rect):
         """Qt 的**逻辑像素**矩形 → 抓屏那张帧上的**物理像素**矩形。

@@ -198,6 +198,10 @@ def main() -> int:
         section("③ tone_align=off：提示词与加它之前逐字相同")
 
         app.config.screen.tone_align = "off"
+        # v2-social-card-inject：起草提示词后来又多了一格 `{peer_profile}`（"对方这个人"）。
+        # 这一节验的是**口吻那一维**，两个开关都得钉住才能"一字不差"地比——所以把那一格
+        # 也明写 off（那一格自己的短路与逐字相同由 `test_social_card_inject.py` 钉）。
+        app.config.screen.card_memory = "off"
         service._session_id, service._peer_name = "S9", "甲"
 
         stub.prompts.clear()
@@ -208,6 +212,7 @@ def main() -> int:
             text=AUTO_TRIGGER_TEXT,
             examples=NO_EXAMPLES,
             peer_tone_hint="",
+            peer_profile="",
         )
         check("★ off 那趟的提示词 == 占位填空串渲染出来的那一份（一字不差）",
               off_prompt == baseline, f"{len(off_prompt)} 字 vs {len(baseline)} 字")
@@ -225,6 +230,7 @@ def main() -> int:
         section("④ tone_align=auto：口吻摘要进提示词，且随对方实时变")
 
         app.config.screen.tone_align = "auto"
+        app.config.screen.card_memory = "auto"      # 上面那一节临时关掉的，这儿还原
         service._peer_lines.clear()
 
         stub.prompts.clear()

@@ -80,6 +80,7 @@ from brain.llm.factory import LLMFactory
 from brain.prompts.templates import (
     SOCIAL_DRAFT_PROMPT,
     SOCIAL_DRAFT_SYSTEM,
+    SOCIAL_PEER_PROFILE_BLOCK,
     SOCIAL_PROFILE_PROMPT,
     SOCIAL_PROFILE_SYSTEM,
     SOCIAL_TONE_HINT_BLOCK,
@@ -1219,6 +1220,7 @@ class SocialReplyService(QObject):
         card_exists: Callable[[], bool] | None = None,
         session_provider: Callable[[], str] | None = None,
         peer_provider: Callable[[], str] | None = None,
+        peer_profile_provider: Callable[[str], str] | None = None,
         idle_seconds: Callable[[], float] | None = None,
         offer_visible: Callable[[], bool] | None = None,
         parent: QObject | None = None,
@@ -1257,7 +1259,13 @@ class SocialReplyService(QObject):
         # 应用名"那一类滤成空串（见 `bootstrap._social_peer_id`）。不接（测试 / 关掉那条线）
         # 就整条降级成"认不出对象名"，`_cooldown_key()` 逐字回到裸会话标识——**老行为**。
         self._peer_provider = peer_provider
-        # 「那排 [好呀] [不用了] 这会儿还挂在气泡上吗」——**由装配层注入的一问**
+        # 「关于对面这个人，我们这边记着什么」（v2-social-card-inject）：**由装配层注入的
+        # 一问**——收一个对象名、回一句可以直接进提示词的档案（三记忆库里属于**这个人**
+        # 那一格：画像 / 关系总述 / 最近碎片）。判据与检索都在 `MindStore` 那边，社交这条
+        # 线**不自己存一份对端档案、也不直接读库**（跟 `_card_exists` / `_examples_provider`
+        # 同一个注入口径）。不接（测试 / 没装记忆模块）就整格降级成空串——`card_memory`
+        # 那一格填 ""，提示词与加它之前逐字相同。
+        self._peer_profile_provider = peer_profile_provider        # 「那排 [好呀] [不用了] 这会儿还挂在气泡上吗」——**由装配层注入的一问**
         # （v2-social-await-prime-fix 改动一）。它问的是界面那边的实况（气泡当前排的
         # 按钮主题是不是社交这一条），不是本服务记的状态。不接（测试 / 没装界面）
         # 就是 None，`dismiss_offer` 退回"来一声就清"的老口径——不接这一问的调用点
@@ -1280,9 +1288,9 @@ class SocialReplyService(QObject):
         # 同一条隐私口径。`tone_align=off` 时这一格永远空着。
         self._peer_lines: dict[str, list[str]] = {}
         # 对方最近那句话走的**规则**意图档（v2-social-card-base）：意图底座按说话者参数化
-        # 之后，帮聊这条线上传 `speaker="peer"` 的落点。**只存内存、只算不注入**——这条
-        # 规则路零延迟、不调模型、不碰库，下一批（v2-social-card-inject）的"对方意图"
-        # 那一格来取它。还没拟过任何一段时是 None。
+        # 之后，帮聊这条线上传 `speaker="peer"` 的落点。**只存内存**——这条规则路零延迟、
+        # 不调模型、不碰库。`_peer_profile_block` 取它，填进提示词的"对方这个人"那一格
+        # （v2-social-card-inject 起真的进提示词）。还没拟过任何一段时是 None。
         self._peer_route = None
         self._chat_reading = False
         # 社交软件此刻在不在前台（v2-social-ocr-path）：主动求助那一拍靠它判断还值不值得
@@ -1416,6 +1424,17 @@ class SocialReplyService(QObject):
         社交这边无从知道）。接的是个回调、每次现问，所以"刚建完"立刻就认得出来。
         """
         self._card_exists = provider
+
+    def set_peer_profile_provider(self, provider: Callable[[str], str]) -> None:
+        """接上"关于对面这个人，我们这边记着什么"的来源（v2-social-card-inject）。
+
+        收一个**对象名**、回一句能直接进提示词的档案——由装配层接 `MindStore`（见
+        `bootstrap._peer_profile_for`）：三记忆库里属于**这个人**那一格（画像 / 关系总述 /
+        最近碎片）。**检索与分格都在记忆模块那边，社交这条线不自己存一份对端档案**——
+        跟 `set_card_exists_provider` 同一个道理。接的是个回调、每次现问，所以刚聊出来的
+        碎片下一拍就能用上。问不到（人名空 / 那一格是空的）就回空串，整格不填。
+        """
+        self._peer_profile_provider = provider
 
     @property
     def enabled(self) -> bool:
@@ -2893,6 +2912,49 @@ class SocialReplyService(QObject):
         字母的）一律按 `auto` 算，功能不该因为一个笔误悄悄失效（默认档就是 `auto`）。"""
         return self._config.screen.tone_align != "off"
 
+    # ---------- "对方这个人"这一格（v2-social-card-inject） ----------
+
+    def _card_memory_on(self) -> bool:
+        """这一趟要不要把"对方这个人"喂进正文。跟 `_tone_align_on` 一个口径：配置里
+        **明写 `off`** 才关，别的值（含写错一个字母的）一律按 `auto` 算。"""
+        return self._config.screen.card_memory != "off"
+
+    def _peer_profile_block(self) -> str:
+        """把"对方这个人"合成一段材料，填 `SOCIAL_DRAFT_PROMPT` 的 `{peer_profile}` 那一格。
+
+        两样：①**对方最新那句话的意图**（`self._peer_route`，批次 v2-social-card-base 算
+        好的、纯规则零延迟那一路）；②**按对端分格检索到的对象档案**（问装配层要）。两样都
+        空就回空串——整格不填，提示词与加它之前**逐字相同**。
+
+        档案那一问是**按对象名**问的，不是按 `_cooldown_key()`（`sid|peer`）：记忆库里那几
+        格的分格坐标就是**这个人**（`_peer_key` 取的是名字摘要），同一个人在另一个会话窗里
+        还是同一个人。认不出对象名（`_peer_name` 空）就**不问**——没有名字就没有格，别把
+        主人那一档端出来当"对方"。
+
+        危机那一支不进这一格：`classify` 的危机短路返回的是"确认 + 低落"这个防御标记，
+        不是真读出来的意图，拿它去指挥措辞是错的。
+        """
+        parts: list[str] = []
+        route = self._peer_route
+        if route is not None and not getattr(route, "crisis", False):
+            intent = str(getattr(route, "intent", "") or "").strip()
+            emotion = str(getattr(route, "emotion", "") or "").strip()
+            if intent:
+                tail = f"（情绪像是{emotion}）" if emotion else ""
+                parts.append(f"对方刚那句的意图是「{intent}」{tail}")
+        peer = self._peer_name
+        if peer and self._peer_profile_provider is not None:
+            try:
+                profile = (self._peer_profile_provider(peer) or "").strip()
+            except Exception as exc:      # noqa: BLE001 —— 见 `_write`：辅助料不该挡住起草
+                logger.debug("对象档案取不出来（%s），这一格不摆", exc)
+                profile = ""
+            if profile:
+                parts.append(f"我手上关于他的记录：{profile}")
+        if not parts:
+            return ""
+        return SOCIAL_PEER_PROFILE_BLOCK.format(peer_profile="；".join(parts))
+
     def _remember_peer_lines(self, peer: str, chat_text: str) -> None:
         """把这一拍认到的对方原话记进**这一场**的账本（只留最近 `TONE_BUFFER_LINES` 行）。
 
@@ -2946,8 +3008,8 @@ class SocialReplyService(QObject):
         # 帮聊这条线上的第一次真实调用，传的是 `speaker="peer"`——判的是**对方**那句，
         # 不是主人那句（主人那句走 `handle_request`，仍是默认的 `"user"`）。
         #
-        # 走的是**纯规则**那一路（`classify` 零延迟、不调模型、不碰库），所以本批只
-        # "算出来放着"：提示词与草稿一个字节都没变，留给下一批的"对方意图"那一格取用。
+        # 走的是**纯规则**那一路（`classify` 零延迟、不调模型、不碰库）。这一格从
+        # v2-social-card-inject 起**真的进提示词**了（`_peer_profile_block` 取它）。
         # 材料空（这一拍没认到对方的话）就留 None——同一个"宁可不注入，也别瞎猜"口径。
         peer_line = _last_peer_line(chat_text)
         self._peer_route = (
@@ -2960,11 +3022,15 @@ class SocialReplyService(QObject):
             summary = self._peer_tone_summary(peer)
             if summary:
                 tone_hint = SOCIAL_TONE_HINT_BLOCK.format(peer_tone_hint=summary)
+        # 对方这个人（v2-social-card-inject）：`_peer_route` ＋ 装配层按对象名检索到的档案。
+        # `card_memory=off` 时整趟不算也不问——提示词与加它之前**逐字相同**。
+        peer_profile = self._peer_profile_block() if self._card_memory_on() else ""
         prompt = SOCIAL_DRAFT_PROMPT.format(
             chat_context=chat_text or NO_CHAT_CONTEXT,
             text=text,
             examples=(examples[:EXAMPLES_CLIP] or NO_EXAMPLES),
             peer_tone_hint=tone_hint,
+            peer_profile=peer_profile,
         )
         try:
             return self._provider().chat_json(prompt, system=SOCIAL_DRAFT_SYSTEM) or {}
