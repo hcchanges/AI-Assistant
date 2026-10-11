@@ -408,6 +408,72 @@ def _looks_like_loading_material(text: object) -> bool:
     return _loading_bodies(tidy_lines(text))
 
 
+# **搜索页**在**文本这一层**长什么样（v2-social-search-state）。
+#
+# 报告 §183 记着的那个真机缺口：点开微信的搜索框之后，整屏就是**搜索页**——最上面一个搜索框
+# （占位字就是「搜索」两个字），下面要么是「搜索指定内容」+ 分组标题（联系人 / 群聊 /
+# 聊天记录 …）那一版，要么是敲了字之后的**分组结果**，要么是「没有找到…相关结果」。
+# 这一屏 16-β 那三条腿**一条都不中**（没有时间列可数、没有账号号 / 未读计数 / 群名行那三类
+# 字面、也不是加载占位），于是跟"加载屏"当初一样一路落到兜底的 `PAGE_PERSONAL`：冒 offer、
+# `_tail_context` 再把搜索结果（`茗风` / `微信号：mingfeng2024`）当成"对方原话"。
+# 当时手上没有搜索态的真机帧，这一档一直没复验（§183「真机缺口二」）；这一批按真机配色 /
+# 版面摆了搜索态的帧（`tests/test_social_search_state.py`），把这一档坐实了。
+#
+# 判据（跟这一路的老态度一致：用户拍板过"按已知文本特征过滤，不靠颜色猜"）：
+#
+#   ① **搜索框那一行 + 搜索页专有的分组标题**，两条都要：
+#      · **搜索框**：`SEARCH_HEAD_ROWS` 行之内有一行**整行就是** `搜索` / `搜索:`——真机
+#        搜索框的占位字只有这两个字。只在**表头那几行**里找，跟固定页名那条腿同一个口径
+#        （`PAGE_HEAD_ROWS` 那条的教训：会话列表里也印着 `服务号` 这类词，按"整屏出现即算"
+#        会把一场真闲聊误判掉）；
+#      · **分组标题**：整屏里有**整行等于** `_SEARCH_ONLY_LINES` 之一。这一组是**搜索页
+#        专有**的——会话列表里有的是 `公众号` / `服务号` / `订阅号` 那几种**账号号**
+#        （正是 `_LIST_MARK_ACCOUNT` 收着的那几个），**没有**收进这一组，所以主窗
+#        （会话列表 + 聊天区）那一版不会被这一条误伤。
+#   ② **空结果那一屏**：搜索框里已经是用户敲进去的字（不是「搜索」这个占位），关键词那一行
+#      还可能压根认不出，整屏只剩「没有找到…相关结果」这一句。这一档**只认"整屏就这一句"**
+#      （去掉装潢之后 ≤ `SEARCH_EMPTY_ROWS` 行）——聊天窗不会长成这样。
+#
+# **两条否决**（跟 `looks_like_list_page` 同一套）：**绿气泡**（自己发过话就是聊天窗，
+# 列表页 / 搜索页上都不会有）与**空屏**（一个字都没认到是"没认到"，按口径 ① 默认放行）。
+#
+# **有意不做的**：
+#   1. **不做"认字之前"的几何闸**：搜索页的字框形状（上面一个宽输入框 + 一片等距短框）跟
+#      会话列表那条"右对齐时间列"不是一个形状——`looks_like_list_boxes` 对它是全瞎的
+#      （真机风格帧上实测 0 命中）。要补就得新起一条腿，而**主窗上那个搜索框恒在最上面**，
+#      ① 的前半条在主窗聊天帧上恒为真，几何那条腿一旦判错就是把主窗里的真单聊挡死。
+#      省下的只是一趟识别，判错的代价是"整场不冒话"——不值得，所以这一条**只判认字之后**，
+#      跟 16-β 那条腿一样：宁可白认一次字。
+#   2. **不碰像素 / 颜色 / 时钟**——同 `looks_like_list_page` 的态度。
+SEARCH_HEAD_ROWS = 4          # 搜索框只可能在窗口最上面那几行里（同 PAGE_HEAD_ROWS 的口径）
+SEARCH_EMPTY_ROWS = 2         # 空结果那一屏：去掉装潢之后最多剩几行（关键词 + 那一句话）
+_SEARCH_BOX_LINE = re.compile(r"搜\s*索\s*[:：]?")
+_SEARCH_ONLY_LINES = ("搜索指定内容", "最近搜索", "搜索历史", "聊天记录")
+_SEARCH_EMPTY_LINE = re.compile(r"没有找到|无搜索结果|暂无搜索结果|没有搜索结果")
+
+
+def looks_like_search_page(read: object) -> bool:
+    """这一屏认出来的字**是不是微信的搜索页**（不是 active 的 1:1 聊天视图）。
+
+    命中就是"这一拍不是 active 的 1:1 聊天视图"（跟 `looks_like_list_page` /
+    `looks_like_loading_page` 同一个契约）：既不冒 offer、也不进材料，装配层据
+    `looks_like_list_page` 把它清成空 read；判据与"有意不做的"见上面那一段。
+    """
+    chat = as_chat_read(read)
+    if any(sender == SENDER_USER for sender, _text in chat.lines):
+        return False        # 自己发过话：这是一场真聊天，不许判搜索页
+    real = [body for body in (tidy_line(text) for _sender, text in chat.lines)
+            if body and not _is_chat_chrome(body)]
+    if not real:
+        return False        # 空屏 / 整屏都是装潢：那是"没认到"，按口径 ① 放行
+    head = real[:SEARCH_HEAD_ROWS]
+    if (any(_SEARCH_BOX_LINE.fullmatch(body) for body in head)
+            and any(body in _SEARCH_ONLY_LINES for body in real)):
+        return True
+    return (len(real) <= SEARCH_EMPTY_ROWS
+            and any(_SEARCH_EMPTY_LINE.search(body) for body in real))
+
+
 # **会话总列表**在**文本这一层**长什么样（v2-social-listview-leak-fix 16-β）。
 #
 # 真机 2026-10-08 12:32:59 那一帧坐实的漏法：整页就是会话总列表，OCR 读出 37 行，
@@ -499,6 +565,12 @@ def looks_like_list_page(read: object) -> bool:
     2026-10-11 09:23:06 的「正在加载」）；它要求**每一行都是占位**，比前两条更保守，
     所以摆在**最后**判。
 
+    四、**微信的搜索页**（`looks_like_search_page`，v2-social-search-state）：上面三条腿对
+    搜索态同样是全瞎的——搜索页没有时间列、没有账号号 / 未读计数 / 群名行那三类字面、
+    也不是加载占位——于是搜索结果会被当成"对方原话"（报告 §183 记的那个缺口）。判据是
+    "搜索框那一行 + 搜索页专有的分组标题"两条都要，或者"整屏只剩一句空结果"。摆在三那条
+    后面：它也保守（两种形状都不是聊天窗能长出来的）。
+
     **没取「行内含时间标记」那一维**（本来考虑过）：真机上它跟第一条腿几乎**逐帧相同**——
     47 帧里只有 9 帧不一样（142749 的 0→1，其余 8 帧都是 12→13），多出来的那一条**全是夹在
     别的字里的**（真机 142749 那一条是预览里的"10月8日"），对补漏零贡献（142749 那帧
@@ -527,7 +599,14 @@ def looks_like_list_page(read: object) -> bool:
     # 字、无一真话）。它跟上面两条腿一样"不是 active 的 1:1 聊天视图"，而上面两条对它是
     # 全瞎的（0 时间行、0 列表字面）——见 `looks_like_loading_page` 那一段。放在**最后**
     # 判：它比前两条更保守（要求"整屏都是占位"），前两条能定的就定，别绕远。
-    return looks_like_loading_page(chat)
+    if looks_like_loading_page(chat):
+        return True
+    # 第四条腿（v2-social-search-state）：**微信的搜索页**。这一屏同样"不是 active 的 1:1
+    # 聊天视图"（`PAGE_LIST` 那一格的字面注释里本来就写着"会话总列表 / 搜索页"），可上面
+    # 三条腿对它全瞎——0 时间行、0 列表字面、也不是加载占位——于是它一路落到兜底的
+    # `PAGE_PERSONAL`，冒 offer 兼把搜索结果当材料（见 `looks_like_search_page` 那一段）。
+    # 摆在最后判的理由同加载屏：它只有两种形状，两种都比上面那几条腿更保守。
+    return looks_like_search_page(chat)
 
 
 # ---- 列表页免全文 OCR：**只跑检测**的廉价先验（v2-social-offer-fast-latency）----
