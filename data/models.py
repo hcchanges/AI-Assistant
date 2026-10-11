@@ -175,6 +175,17 @@ class Card(Base):
     trip_date: Mapped[datetime | None] = mapped_column(DateTime, default=None)
     # 卡面图标（指令 25-A 第 3 项）：只有自建卡会带；空 = 不画图标
     icon: Mapped[str | None] = mapped_column(String(8), default=None)
+    # ---------- 对象档案（v2-social-card-base） ----------
+    # 对象攻略卡专用的四个结构化格子：原先对方信息只有《对方信息.md》那一整段自由文本，
+    # 帮聊那条线要按"喜好 / 禁忌 / 攻略策略 / 到哪一步了"分开取用，自由文本没法分开取。
+    #
+    # **四列都可以为空**：只有对象攻略卡会填，其余八类卡建出来就是 NULL；老库那批卡
+    # 同样全是 NULL（`data/db.py::_add_missing_columns` 只给老表补可空列，所以这是
+    # 加列即兼容，不需要另写迁移）。
+    likes: Mapped[str | None] = mapped_column(Text, default=None)
+    dislikes: Mapped[str | None] = mapped_column(Text, default=None)
+    strategy: Mapped[str | None] = mapped_column(Text, default=None)
+    relation_stage: Mapped[str | None] = mapped_column(Text, default=None)
     # 专属知识库目录（v2-card-kb）：这张卡对应的卡级 RAG 落点，默认 知识库/cards/<id>。
     # 空 = 老卡还没建（按默认约定路径现算）；建卡时由 CardService 顺手建目录并填上。
     kb_path: Mapped[str | None] = mapped_column(String(512), default=None)

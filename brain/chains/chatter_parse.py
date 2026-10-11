@@ -29,7 +29,9 @@ from brain.llm.factory import LLMFactory
 from brain.prompts.templates import (
     CHATTER_PARSE_PROMPT,
     FOLLOWUP_INTENT_PROMPT,
+    SPEAKER_USER,
     now_text,
+    speaker_label,
 )
 from core.config import Config
 from life.mind import local_llm
@@ -71,6 +73,9 @@ VALID_COMMANDS = (
 
 @dataclass
 class ChatterAnalysis:
+    # v2-social-card-base：这份解析是"谁说的"。默认 user（主聊天那条线），
+    # 帮聊那条线传 peer——下游据此知道 intent / emotion 描述的是**对方**而不是主人。
+    speaker: str = SPEAKER_USER
     scene: str = ""
     time_hint: str = ""
     time_iso: datetime | None = None
@@ -151,13 +156,19 @@ class ChatterParseChain:
         self._last_used_local = False
         return LLMFactory.create(self._config).chat_json(prompt, system=system)
 
-    def analyze(self, text: str) -> ChatterAnalysis:
-        """解析一条吐嘈。"""
+    def analyze(self, text: str, speaker: str = SPEAKER_USER) -> ChatterAnalysis:
+        """解析一条吐嘈。
+
+        ``speaker``（v2-social-card-base）：这句话是谁说的。默认 ``"user"``——主聊天那条线
+        一个字节都不改（提示词里那两处仍拼出"用户"）；帮聊那条线传 ``"peer"``，拼出来的
+        提示词把主语换成"对方"，同一套抽取规则用在**对方**那句话上。
+        """
         now, weekday = now_text()
         prompt = CHATTER_PARSE_PROMPT.format(
             now=now,
             weekday=weekday,
             text=text,
+            speaker=speaker_label(speaker),
         )
         system = resolve_voice(self._config.pet).system_prompt(self._config.pet.name)
         data = self._ask(prompt, system)
@@ -171,6 +182,7 @@ class ChatterParseChain:
             command = ""      # 模型偶尔会自己造名字，认不出来的当没这条命令
 
         analysis = ChatterAnalysis(
+            speaker=str(speaker or SPEAKER_USER).strip().lower() or SPEAKER_USER,
             scene=str(data.get("scene") or "").strip(),
             time_hint=str(data.get("time_hint") or "").strip(),
             time_iso=parse_iso(data.get("time_iso")),

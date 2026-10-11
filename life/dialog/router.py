@@ -24,6 +24,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 
+from brain.prompts.templates import SPEAKER_USER
 from life.psych.crisis import is_crisis
 
 # ---------- 意图 ----------
@@ -226,15 +227,22 @@ def _emotion_of(text: str) -> str:
     return EMOTION_CALM
 
 
-def classify(text: str) -> DialogRoute:
-    """把一句用户的话分成 (意图, 情绪)。纯规则，不调模型、不碰库、零延迟。
+def classify(text: str, speaker: str = SPEAKER_USER) -> DialogRoute:
+    """把一句话分成 (意图, 情绪)。纯规则，不调模型、不碰库、零延迟。
 
     优先级 指令 > 倾诉 > 求助 > 闲聊 > 确认（先查到的赢）；无命中兜底「确认」。
     情绪独立算，跟意图互不干扰。
 
     第一道是危机词（防御纵深，见模块开头）：命中就原样返回，不进五类分支、
     不调模型，情绪给"低落"——真出了事，往"更软"那边偏永远比往"更硬"那边偏安全。
+
+    ``speaker``（v2-social-card-base）：这句话是谁说的。**规则一条都不按它分**——词表
+    （指令 / 倾诉 / 求助 / 闲聊 / 确认）对谁说话都是同一套，这条路本来就是纯文本命中，
+    没有"用户"这个前提可换。参数在这儿是为了跟意图底座那三层（`IntentJudge.judge` /
+    `IntentChain.classify` / `ChatterParseChain.analyze`）**同一个口径**：调用方按说话者
+    传下去，将来真有按说话者分表的词表时不用再改签名。默认 ``"user"``，行为零变化。
     """
+    _ = speaker          # 规则与说话者无关，签名对齐用（见上面那段）
     t = text or ""
     if is_crisis(t):
         return DialogRoute(INTENT_CONFIRM, EMOTION_LOW, matched=False, crisis=True)

@@ -17,6 +17,12 @@
 跟 `fragment.src_time` 一个道理；载荷一律密文，连 `level` / `exp` 这种数字也是，
 因为它们放一起就说明"这人跟桌宠处到什么份上了"，本身就是关系数据。
 
+**peer 维度（v2-social-card-base）**：`struct_profile` / `ep_summary` / `fragment` /
+`memory_book` 四张表各多一列 `peer`——原先它们描述的都是"桌宠与主人"这一段，帮聊那条
+线要看的是**另一个人**的档案，两者必须分格。这一列里存的是 `sha256(对端名字)` 的摘要
+（见 `_peer_key`），不是名字本身：名字属于密文那一档，明文落库会把整库加密破一半。
+空串 `''` 是"主人自己那一档"，历史数据与所有不传 peer 的老调用点都落在这儿，行为不变。
+
 密钥从哪来（绝不硬编码）：
 1. 环境变量 ``PET_MIND_KEY``；
 2. 系统凭据管理器（Windows 凭据管理器，凭据名 ``mind_db_key``）；
@@ -31,6 +37,7 @@
 from __future__ import annotations
 
 import base64
+import hashlib
 import json
 import logging
 import os
@@ -57,9 +64,35 @@ _KDF_ITERATIONS = 100_000
 # 画像 / 关系总述 / 好感度都只有一行：它们描述的是"此刻是什么状态"，覆写式更新
 _SINGLETON_ID = 1
 
+# ---------- peer 维度（v2-social-card-base） ----------
+#
+# 这四张表原先描述的都是"桌宠与主人"这一段关系：画像只有一行（`id=1`）、关系总述只有一行、
+# 碎片与记忆簿没有"这是跟谁的事"这一维。帮聊那条线要看的是**另一个人**的档案（对方喜欢
+# 什么、忌讳什么、聊到哪一步了），跟主人的那份必须分格——所以四张表各加一列 `peer`。
+#
+# **`peer` 列里存的是键，不是名字。** 名字（"小明""领导"）本身是密文那一档的私密信息，
+# 明文落在 mind.db 里就把"整库加密"这条承诺破了一半。所以对外收的是名字、进库的是
+# `sha256(名字)` 前 32 位十六进制（见 `_peer_key`）：既能当查的坐标用（跟 id / src_time
+# 同类，是"拿来查的"，不是载荷），又不可逆、不泄露是谁。空串（`''`）是**主人自己那一档**
+# ——历史数据、主聊天那条线、没传 peer 的老调用点全落在这儿，行为与加这一列之前一致。
+_PEER_TABLES = ("struct_profile", "ep_summary", "fragment", "memory_book")
+
+# 唯一索引：`struct_profile` / `ep_summary` 由"单例一行"变成"一个 peer 一行"，
+# `memory_book` 由"一天一页"变成"一天一个 peer 一页"。
+#
+# **这两条索引不能在 SCHEMA 里建**：老库那四张表还没有 peer 列，索引先建会直接失败；
+# 而且老库上已经有一条 `idx_memory_book_date`（只看日期），跟"按 peer 分"打架，得先拆。
+# 所以顺序是：建表 → 补列 → 拆老索引 → 建新索引（见 `_migrate`）。
+_INDEXES = """
+CREATE UNIQUE INDEX IF NOT EXISTS idx_struct_profile_peer ON struct_profile(peer);
+CREATE UNIQUE INDEX IF NOT EXISTS idx_ep_summary_peer ON ep_summary(peer);
+CREATE UNIQUE INDEX IF NOT EXISTS idx_memory_book_date_peer ON memory_book(date, peer);
+"""
+
 SCHEMA = """
 CREATE TABLE IF NOT EXISTS struct_profile (
     id          INTEGER PRIMARY KEY,
+    peer        TEXT NOT NULL DEFAULT '',
     name        TEXT,
     gender      TEXT,
     occupation  TEXT,
@@ -69,6 +102,7 @@ CREATE TABLE IF NOT EXISTS struct_profile (
 );
 CREATE TABLE IF NOT EXISTS ep_summary (
     id               INTEGER PRIMARY KEY,
+    peer             TEXT NOT NULL DEFAULT '',
     rel_state        TEXT,
     emotion_snapshot TEXT,
     events_json      TEXT,
@@ -76,6 +110,7 @@ CREATE TABLE IF NOT EXISTS ep_summary (
 );
 CREATE TABLE IF NOT EXISTS fragment (
     id       INTEGER PRIMARY KEY AUTOINCREMENT,
+    peer     TEXT NOT NULL DEFAULT '',
     text     TEXT,
     src_time TEXT,
     tags     TEXT
@@ -97,11 +132,11 @@ CREATE TABLE IF NOT EXISTS star_cards (
 );
 CREATE TABLE IF NOT EXISTS memory_book (
     id      INTEGER PRIMARY KEY AUTOINCREMENT,
+    peer    TEXT NOT NULL DEFAULT '',
     date    TEXT,
     summary TEXT,
     entries TEXT
 );
-CREATE UNIQUE INDEX IF NOT EXISTS idx_memory_book_date ON memory_book(date);
 CREATE TABLE IF NOT EXISTS emotion_event (
     id          INTEGER PRIMARY KEY AUTOINCREMENT,
     text        TEXT,
@@ -114,6 +149,21 @@ CREATE TABLE IF NOT EXISTS emotion_event (
 
 # 三张表的可写字段（加密入库的那几列）
 _PROFILE_FIELDS = ("name", "gender", "occupation", "family", "intro")
+
+
+def _peer_key(peer: object) -> str:
+    """对端（peer）在库里的键：空串原样留着，其余取 `sha256(名字)` 前 32 位。
+
+    为什么不直接存名字：这一列是**查的坐标**（跟 id / src_time / date 同类），不是载荷；
+    可它不是"哪一天""第几条"那种公开坐标，是一个**人名或昵称**——明文落进 mind.db，
+    等于在整库密文里开了一格白名单，翻到文件的人一眼就知道"它最近在跟谁聊天"。取摘要
+    之后：同一个名字永远算出同一个键（能当键用、能做唯一索引、能按它对表），但拿不到名字。
+    32 位十六进制 = 128 位，几个对端之间撞不出重。
+    """
+    text = str(peer or "").strip()
+    if not text:
+        return ""
+    return hashlib.sha256(text.encode("utf-8")).hexdigest()[:32]
 
 
 def _derive(passphrase: str) -> bytes:
@@ -177,7 +227,41 @@ class MindStore:
         self._conn.row_factory = sqlite3.Row
         with self._lock:
             self._conn.executescript(SCHEMA)
+            self._migrate()
             self._conn.commit()
+
+    def _migrate(self) -> None:
+        """把老库补成新形状（v2-social-card-base）：补 peer 列、换记忆簿那条唯一索引。
+
+        `CREATE TABLE IF NOT EXISTS` 对**已经存在**的表一个字都不会改，所以老库那四张表
+        不会自己长出 peer 列，得自己来。补列的声明带 `NOT NULL DEFAULT ''`——SQLite 的
+        `ALTER TABLE ADD COLUMN` 允许这么干，老行会一律拿空串，正好落进"主人自己那一档"，
+        跟加这一列之前的行为完全一致。
+
+        记忆簿那条老索引（`idx_memory_book_date`，只看日期）跟"一天一个 peer 一页"打架，
+        先拆掉再建新的。整段是幂等的：跑第二遍时列已经在、老索引已经不在了，什么都没发生。
+        """
+        for table in _PEER_TABLES:
+            self._add_column(table, "peer", "TEXT NOT NULL DEFAULT ''")
+        self._conn.execute("DROP INDEX IF EXISTS idx_memory_book_date")
+        try:
+            self._conn.executescript(_INDEXES)
+        except sqlite3.Error as exc:
+            # 唯一索引是**护栏**不是命门：真有老库带着重复行（手工改过 / 半截迁移），
+            # 建不上也只记一笔——把库整个打不开才是真出事。
+            logger.warning("情感记忆库：peer 唯一索引没建上（%s），按没有护栏继续", exc)
+
+    def _add_column(self, table: str, column: str, declaration: str) -> None:
+        """表里没这一列就补上（幂等）。表不存在时什么都不做。"""
+        try:
+            columns = {row[1] for row in self._conn.execute(f"PRAGMA table_info({table})")}
+        except sqlite3.Error as exc:
+            logger.warning("情感记忆库：%s 的表结构读不出来（%s），这一列不补", table, exc)
+            return
+        if not columns or column in columns:
+            return
+        self._conn.execute(f"ALTER TABLE {table} ADD COLUMN {column} {declaration}")
+        logger.info("情感记忆库：%s 补上 %s 列（v2-social-card-base）", table, column)
 
     def attach_index(self, index: Any) -> None:
         """接上向量索引（S1）。没接上就检索只走 SQL LIKE，功能不塌。"""
@@ -218,8 +302,14 @@ class MindStore:
 
     # ---------- 结构画像 ----------
 
-    def save_profile(self, **fields: Any) -> None:
-        """覆写式写入已知项。只更新这次给到的字段，其余留着（聊到一点补一点）。"""
+    def save_profile(self, peer: str = "", **fields: Any) -> None:
+        """覆写式写入已知项。只更新这次给到的字段，其余留着（聊到一点补一点）。
+
+        ``peer``（v2-social-card-base）：这份画像是**谁的**。默认空串 = 主人自己那一档，
+        行为与加这一列之前一模一样；传对端名字（如 `"小明"`）就写到他那格去。
+        不传 `peer` 的老调用点（`distill.py`）一个字都不用改。
+        """
+        who = _peer_key(peer)
         values = {k: v for k, v in fields.items() if k in _PROFILE_FIELDS}
         if not values:
             return
@@ -227,18 +317,19 @@ class MindStore:
         assignments = ", ".join(f"{k} = ?" for k in encrypted)
         with self._lock:
             self._conn.execute(
-                "INSERT OR IGNORE INTO struct_profile (id) VALUES (?)", (_SINGLETON_ID,)
+                "INSERT OR IGNORE INTO struct_profile (peer) VALUES (?)", (who,)
             )
             self._conn.execute(
-                f"UPDATE struct_profile SET {assignments}, updated_at = ? WHERE id = ?",
-                (*encrypted.values(), _stamp(), _SINGLETON_ID),
+                f"UPDATE struct_profile SET {assignments}, updated_at = ? WHERE peer = ?",
+                (*encrypted.values(), _stamp(), who),
             )
             self._conn.commit()
 
-    def profile(self) -> dict[str, str]:
+    def profile(self, peer: str = "") -> dict[str, str]:
+        """这一格的结构画像。没有这一行就回 `{}`（跟加 peer 之前同一个口径）。"""
         with self._lock:
             row = self._conn.execute(
-                "SELECT * FROM struct_profile WHERE id = ?", (_SINGLETON_ID,)
+                "SELECT * FROM struct_profile WHERE peer = ?", (_peer_key(peer),)
             ).fetchone()
         if row is None:
             return {}
@@ -252,12 +343,17 @@ class MindStore:
         rel_state: str = "",
         emotion_snapshot: str = "",
         events: Sequence[str] | None = None,
+        peer: str = "",
     ) -> None:
         """写关系记忆库 / 情绪记忆库 / 事件记忆库的总述。
 
         三条线共用一行：它们描述的都是"眼下这段关系的状态"，分开存反而
         会出现三个 updated_at 各说各话。这次没提到的字段沿用上一版。
+
+        ``peer``（v2-social-card-base）：这是**跟谁**的关系总述。默认空串 = 主人自己
+        那一档（老行为一字未变）；传对端名字就写到他那格去，与主人那格互不影响。
         """
+        who = _peer_key(peer)
         patch: dict[str, Any] = {}
         if rel_state:
             patch["rel_state"] = self._enc(rel_state)
@@ -270,18 +366,19 @@ class MindStore:
         assignments = ", ".join(f"{k} = ?" for k in patch)
         with self._lock:
             self._conn.execute(
-                "INSERT OR IGNORE INTO ep_summary (id) VALUES (?)", (_SINGLETON_ID,)
+                "INSERT OR IGNORE INTO ep_summary (peer) VALUES (?)", (who,)
             )
             self._conn.execute(
-                f"UPDATE ep_summary SET {assignments}, updated_at = ? WHERE id = ?",
-                (*patch.values(), _stamp(), _SINGLETON_ID),
+                f"UPDATE ep_summary SET {assignments}, updated_at = ? WHERE peer = ?",
+                (*patch.values(), _stamp(), who),
             )
             self._conn.commit()
 
-    def ep(self) -> dict[str, Any]:
+    def ep(self, peer: str = "") -> dict[str, Any]:
+        """这一格的关系/情绪总述。还没有这一行就给一份空壳（跟加 peer 之前同一个口径）。"""
         with self._lock:
             row = self._conn.execute(
-                "SELECT * FROM ep_summary WHERE id = ?", (_SINGLETON_ID,)
+                "SELECT * FROM ep_summary WHERE peer = ?", (_peer_key(peer),)
             ).fetchone()
         if row is None:
             return {"rel_state": "", "emotion_snapshot": "", "events": [], "updated_at": ""}
@@ -385,36 +482,53 @@ class MindStore:
     # ---------- 记忆簿 ----------
 
     def save_memory_book(
-        self, date: str, summary: str, entries: Sequence[str] = ()
+        self, date: str, summary: str, entries: Sequence[str] = (), peer: str = ""
     ) -> None:
         """写一天的一页。同一天反复写是覆写，不是追加——那天还没过完，
-        每提炼一轮就把这页重写一遍，最后留下的就是全的。"""
+        每提炼一轮就把这页重写一遍，最后留下的就是全的。
+
+        ``peer``（v2-social-card-base）：这一页是**跟谁**的。冲突判据从 `(date)` 变成
+        `(date, peer)`——同一天里主人一页、每个对端各一页，互不覆盖。默认空串就是原来
+        那一页，老调用点行为一字未变。
+        """
         day = (date or "").strip()
         if not day:
             return
+        who = _peer_key(peer)
         with self._lock:
             self._conn.execute(
-                "INSERT INTO memory_book (date, summary, entries) VALUES (?, ?, ?) "
-                "ON CONFLICT(date) DO UPDATE SET summary = excluded.summary, "
+                "INSERT INTO memory_book (date, peer, summary, entries) VALUES (?, ?, ?, ?) "
+                "ON CONFLICT(date, peer) DO UPDATE SET summary = excluded.summary, "
                 "entries = excluded.entries",
-                (day, self._enc(summary), self._enc(list(entries))),
+                (day, who, self._enc(summary), self._enc(list(entries))),
             )
             self._conn.commit()
 
-    def memory_book(self, date: str) -> dict[str, Any] | None:
+    def memory_book(self, date: str, peer: str = "") -> dict[str, Any] | None:
         with self._lock:
             row = self._conn.execute(
-                "SELECT * FROM memory_book WHERE date = ?", ((date or "").strip(),)
+                "SELECT * FROM memory_book WHERE date = ? AND peer = ?",
+                ((date or "").strip(), _peer_key(peer)),
             ).fetchone()
         return _row_to_memory_book(row, self) if row is not None else None
 
-    def memory_books(self, limit: int | None = None) -> list[dict[str, Any]]:
-        """最近的在前（按日期倒序，跟 id 顺序一致：一天只写一个 id）。"""
-        sql = "SELECT * FROM memory_book ORDER BY date DESC, id DESC"
+    def memory_books(
+        self, limit: int | None = None, peer: object = None
+    ) -> list[dict[str, Any]]:
+        """最近的在前（按日期倒序，跟 id 顺序一致：一天一个 peer 一个 id）。
+
+        ``peer`` 三态：`None`（默认）= **所有**（老调用点要的就是"这段时间记了什么"，
+        跟加这一列之前完全一样）；空串 = 只看主人自己那一档；给了名字 = 只看那一格。
+        """
+        sql = "SELECT * FROM memory_book"
         params: tuple = ()
+        if peer is not None:
+            sql += " WHERE peer = ?"
+            params = (_peer_key(peer),)
+        sql += " ORDER BY date DESC, id DESC"
         if limit is not None:
             sql += " LIMIT ?"
-            params = (limit,)
+            params = (*params, limit)
         with self._lock:
             rows = self._conn.execute(sql, params).fetchall()
         return [_row_to_memory_book(row, self) for row in rows]
@@ -422,32 +536,43 @@ class MindStore:
     # ---------- 碎片 ----------
 
     def add_fragment(
-        self, text: str, tags: Iterable[str] = (), src_time: datetime | str | None = None
+        self,
+        text: str,
+        tags: Iterable[str] = (),
+        src_time: datetime | str | None = None,
+        peer: str = "",
     ) -> int | None:
         """存一条生活碎片。空文本不存——碎片的价值全在内容里。
 
         落库之后顺带补一条向量（S1）。**向量失败不算写失败**——正文已经进了加密库，
         索引只是召回的一条腿，塌了还有 SQL LIKE 兜着，不该把这条碎片一起丢掉。
+
+        ``peer``（v2-social-card-base）：这条碎片是**跟谁**的。默认空串 = 主人自己
+        那一档，老调用点行为一字未变；传对端名字就落到他那格，检索时按同一格取。
         """
         if not text or not text.strip():
             return None
+        who = _peer_key(peer)
         when = src_time.isoformat(timespec="seconds") if isinstance(src_time, datetime) else (
             str(src_time) if src_time else _stamp()
         )
         with self._lock:
             cursor = self._conn.execute(
-                "INSERT INTO fragment (text, src_time, tags) VALUES (?, ?, ?)",
-                (self._enc(text), when, self._enc(list(tags))),
+                "INSERT INTO fragment (text, peer, src_time, tags) VALUES (?, ?, ?, ?)",
+                (self._enc(text), who, when, self._enc(list(tags))),
             )
             self._conn.commit()
             fragment_id = int(cursor.lastrowid)
-        self._index_fragment(fragment_id, text)
+        self._index_fragment(fragment_id, text, who)
         return fragment_id
 
-    def _index_fragment(self, fragment_id: int, text: str) -> None:
+    def _index_fragment(self, fragment_id: int, text: str, peer: str = "") -> None:
         if self._index is None:
             return
         try:
+            self._index.add(fragment_id, text, peer)
+        except TypeError:
+            # 老索引对象（只收两个参数）——向量那条腿塌了不连累正文，照写不误
             self._index.add(fragment_id, text)
         except Exception as exc:  # 索引塌了不能连累正文
             logger.error("情感记忆：碎片 %d 的向量没算成（%s），检索退回字面", fragment_id, exc)
@@ -460,13 +585,23 @@ class MindStore:
             ).fetchone()
         return _row_to_fragment(row, self) if row is not None else None
 
-    def fragments(self, limit: int | None = None) -> list[dict[str, Any]]:
-        """最新的在前。全部读出来解密——检索那边要的也是明文（见 recall.py）。"""
-        sql = "SELECT * FROM fragment ORDER BY id DESC"
+    def fragments(
+        self, limit: int | None = None, peer: object = None
+    ) -> list[dict[str, Any]]:
+        """最新的在前。全部读出来解密——检索那边要的也是明文（见 recall.py）。
+
+        ``peer`` 三态同 `memory_books`：`None`（默认）= 所有（老调用点一字不改）；
+        空串 = 只看主人自己那一档；给了名字 = 只看那一格（帮聊那条线要的）。
+        """
+        sql = "SELECT * FROM fragment"
         params: tuple = ()
+        if peer is not None:
+            sql += " WHERE peer = ?"
+            params = (_peer_key(peer),)
+        sql += " ORDER BY id DESC"
         if limit is not None:
             sql += " LIMIT ?"
-            params = (limit,)
+            params = (*params, limit)
         with self._lock:
             rows = self._conn.execute(sql, params).fetchall()
         return [_row_to_fragment(row, self) for row in rows]
@@ -567,9 +702,14 @@ class MindStore:
 
 
 def _row_to_fragment(row: sqlite3.Row, store: "MindStore") -> dict[str, Any]:
-    """一行 fragment（密文）→ 一条碎片（明文）。tags 那列是 JSON 数组。"""
+    """一行 fragment（密文）→ 一条碎片（明文）。tags 那列是 JSON 数组。
+
+    ``peer`` 带出去的是**键**不是名字（见 `_peer_key`）：调用方按它分组 / 过滤够用，
+    想拿到名字得自己手上本来就有（帮聊那条线就有）。
+    """
     return {
         "id": row["id"],
+        "peer": row["peer"] or "",
         "text": store._dec(row["text"]),
         "src_time": row["src_time"] or "",
         "tags": [str(t) for t in store._dec_json(row["tags"])],
@@ -589,9 +729,13 @@ def _row_to_star_card(row: sqlite3.Row, store: "MindStore") -> dict[str, Any]:
 
 
 def _row_to_memory_book(row: sqlite3.Row, store: "MindStore") -> dict[str, Any]:
-    """一行 memory_book（密文）→ 一页日记（明文）。entries 那列是 JSON 数组。"""
+    """一行 memory_book（密文）→ 一页日记（明文）。entries 那列是 JSON 数组。
+
+    ``peer`` 同 `_row_to_fragment`：带出去的是键（空串 = 主人自己那一档）。
+    """
     return {
         "id": row["id"],
+        "peer": row["peer"] or "",
         "date": row["date"] or "",
         "summary": store._dec(row["summary"]),
         "entries": [str(item) for item in store._dec_json(row["entries"])],

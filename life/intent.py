@@ -31,6 +31,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 
+from brain.prompts.templates import SPEAKER_USER
 from core.config import Config
 from life.cards.classify import CardClassifier
 from life.profile.extract import has_travel_destination
@@ -68,8 +69,14 @@ class IntentJudge:
 
     # ---------- 本地判定 ----------
 
-    def judge(self, text: str, timed: bool = False) -> Intent:
+    def judge(self, text: str, timed: bool = False, speaker: str = SPEAKER_USER) -> Intent:
         """本地能定的就本地定，定不出来返回 NONE（要不要请模型看，见 needs_fallback）。
+
+        ``speaker``（v2-social-card-base）：这句话是谁说的。**词表一条都不按它分**——
+        工作 / 生活那几张表对谁说话都是同一套，这条路本来是纯文本命中，没有"用户"
+        这个前提可换（跟 `router.classify` 同一个姿态）。参数在这儿是为了跟意图底座
+        另外三层同一个口径：帮聊那条线传 ``"peer"``，判的就是"**对方**这句话要不要帮忙"。
+        默认 ``"user"``，行为零变化。
 
         timed 是"这句话报了时间"（解析链给的 ChatterAnalysis.timed）：报了时间的句子
         生活品类才算数，因为它本来会被提醒那条线整句接走。
@@ -99,7 +106,9 @@ class IntentJudge:
             return Intent(LIFE, theme=theme, urgent=_has(text, self._urgent))
         return Intent(NONE)
 
-    def needs_fallback(self, text: str, emotion_score: float) -> bool:
+    def needs_fallback(
+        self, text: str, emotion_score: float, speaker: str = SPEAKER_USER
+    ) -> bool:
         """本地没判出来，但这句值不值得请模型再看一眼。
 
         条件写得窄：话里有求助信号、而且带着情绪才问模型——生词加急事（"帮我把那个弄一下"）
@@ -109,8 +118,10 @@ class IntentJudge:
         这正是要拦住的那类误判（宁可这一句不动手，也别弹错卡）。
 
         显式提醒词同样不问：用户明说了要提醒，模型再判成"该弹张卡"也不该顶掉它。
+
+        ``speaker`` 原样转给 `judge`（谁说的话，默认还是 user），这一步本身不按它分。
         """
-        if self.judge(text).actionable:
+        if self.judge(text, speaker=speaker).actionable:
             return False
         if _has(text, self._work):
             return False

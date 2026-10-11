@@ -28,11 +28,22 @@ from PySide6.QtWidgets import (
 from life.cards.templates import (
     CARD_ICONS,
     CARD_TITLE_MAX,
+    EMOTION_CATEGORY,
     LIFE_CATEGORIES,
     PERSONAL_ACTIVE_MAX,
     category_icon,
 )
 from ui.theme import PANEL_QSS
+
+# 对象档案那四格（v2-social-card-base）：只在「情感」这个大类的建卡框里露面。
+# 其余八类卡（出行 / 餐饮 / 作息…）没有"对方"这回事，把这四行摆出来只会让人以为要填。
+# 顺序就是界面上的顺序，取值就是 `Card` 上那四列的名字（直接喂给 `create_manual`）。
+PROFILE_FIELDS: tuple[tuple[str, str, str], ...] = (
+    ("likes", "喜好", "对方喜欢什么：爱吃什么、爱聊什么、什么话题接得住"),
+    ("dislikes", "禁忌", "别踩的：不爱听什么、什么话题冷场、什么不能提"),
+    ("strategy", "攻略", "打算怎么走：先聊什么、什么时候约、送什么合适"),
+    ("relation_stage", "到哪一步", "现在是什么关系：刚认识 / 聊得来 / 在暧昧 / 处着"),
+)
 
 
 class CardFormDialog(QDialog):
@@ -40,6 +51,10 @@ class CardFormDialog(QDialog):
 
     ① 选大类（8 选 1）→ ② 卡名（默认就是大类名，可改，≤10 字）→ ③ 图标 + 一句话描述。
     换大类时，卡名与图标如果还停在上一类的默认值，就跟着换；用户自己改过就不动他的。
+
+    **v2-social-card-base 加了一组可选的"对象档案"**：选中的大类是「情感」时，底下多出
+    喜好 / 禁忌 / 攻略 / 到哪一步四行（见 `PROFILE_FIELDS`），其余大类整组不显示。
+    四行全留空也照样能建卡——它们只是"能填的地方"，不是必填项。
     """
 
     def __init__(self, parent: QWidget | None = None):
@@ -78,6 +93,29 @@ class CardFormDialog(QDialog):
         form.addRow("③ 描述", self._description)
         layout.addLayout(form)
 
+        # 对象档案那四格：**只对「情感」露面**（见类文档），所以单独一个表单块摆在下面，
+        # 跟上面那三步分开显隐。标签与输入框都自己拿着引用，收的时候两个一起收——
+        # 不依赖 `QFormLayout.setRowVisible`（那个要新版本 Qt）。
+        self._profile_hint = QLabel(
+            "④ 对方档案（可选，都留空也行）：填了它，帮你措辞时能照着这个人来。",
+            self,
+        )
+        self._profile_hint.setObjectName("MutedLabel")
+        self._profile_hint.setWordWrap(True)
+        layout.addWidget(self._profile_hint)
+
+        profile_form = QFormLayout()
+        self._profile_rows: list[tuple[QLabel, QLineEdit]] = []
+        self._profile_edits: dict[str, QLineEdit] = {}
+        for key, label, placeholder in PROFILE_FIELDS:
+            tag = QLabel(f"④ {label}", self)
+            edit = QLineEdit(self)
+            edit.setPlaceholderText(placeholder)
+            profile_form.addRow(tag, edit)
+            self._profile_rows.append((tag, edit))
+            self._profile_edits[key] = edit
+        layout.addLayout(profile_form)
+
         self._error = QLabel("", self)
         self._error.setObjectName("MutedLabel")
         layout.addWidget(self._error)
@@ -95,6 +133,7 @@ class CardFormDialog(QDialog):
         self._last_category = LIFE_CATEGORIES[0]
         self._title.setText(self._last_category)
         self._select_icon(category_icon(self._last_category))
+        self._sync_profile_visible()
         self._category.currentTextChanged.connect(self._on_category_changed)
 
     def _on_category_changed(self, category: str) -> None:
@@ -103,6 +142,19 @@ class CardFormDialog(QDialog):
         if self._icon.currentText() == category_icon(self._last_category):
             self._select_icon(category_icon(category))
         self._last_category = category
+        self._sync_profile_visible()
+
+    def _sync_profile_visible(self) -> None:
+        """对象档案那四行只在「情感」露面（换大类就跟着显 / 隐）。
+
+        **只隐藏、不清空**：用户先在「情感」下填了两行、又切去「出行」看一眼再切回来，
+        填过的字该还在——切成别的大类只是"这一屏用不上它"，不是"把它删了"。
+        """
+        show = self._category.currentText() == EMOTION_CATEGORY
+        self._profile_hint.setVisible(show)
+        for tag, edit in self._profile_rows:
+            tag.setVisible(show)
+            edit.setVisible(show)
 
     def _select_icon(self, icon: str) -> None:
         index = self._icon.findText(icon)
@@ -116,13 +168,26 @@ class CardFormDialog(QDialog):
         self.accept()
 
     def values(self) -> tuple[str, str, str, str]:
-        """(大类, 卡名, 图标, 一句话描述)。"""
+        """(大类, 卡名, 图标, 一句话描述)。**四个值，跟加对象档案之前一模一样。**"""
         return (
             self._category.currentText(),
             self._title.text().strip(),
             self._icon.currentText(),
             self._description.text().strip(),
         )
+
+    def profile(self) -> dict[str, str]:
+        """对象档案那四格填了什么（v2-social-card-base）。**只回填了的那几格。**
+
+        跟 `data/dao.py::_profile_columns` 同一个口径（空的不给、键就是 `Card` 上的列名），
+        调用方拿到就能直接喂 `create_manual(..., profile=...)`。一行都没填 → `{}`，
+        建出来的卡那四列是 NULL，与"没有这四格"完全一样。
+        """
+        return {
+            key: edit.text().strip()
+            for key, edit in self._profile_edits.items()
+            if edit.text().strip()
+        }
 
 
 class CardOfferDialog(QDialog):

@@ -178,10 +178,15 @@ class LifePanel(QWidget):
         dialog = CardFormDialog(self)
         accepted = dialog.exec() == QDialog.Accepted
         category, title, icon, description = dialog.values()
+        # 对象档案那四格（v2-social-card-base）：只有「情感」卡会填，别的类一律是 {}，
+        # 传下去跟不传一样（`create_manual` 的 `profile` 默认为 None）。
+        profile = dialog.profile()
         dialog.deleteLater()
         if not accepted:
             return
-        made = self._card_service.create_manual(category, title, icon, description)
+        made = self._card_service.create_manual(
+            category, title, icon, description, profile=profile
+        )
         self._bus.toast.emit(f"建好了：「{made}」" if made else "这张卡没建成，看看卡位是不是满了")
 
     def _open_card_book(self) -> None:

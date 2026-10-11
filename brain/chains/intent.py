@@ -10,7 +10,11 @@
 from __future__ import annotations
 
 from brain.llm.factory import LLMFactory
-from brain.prompts.templates import SERVICE_INTENT_PROMPT
+from brain.prompts.templates import (
+    SERVICE_INTENT_PROMPT,
+    SPEAKER_USER,
+    speaker_label,
+)
 from core.config import Config
 
 # 只要结构化结果，不要宠物腔调：给一句中性的系统提示，也顺带避开注入
@@ -25,12 +29,19 @@ class IntentChain:
     def __init__(self, config: Config):
         self._config = config
 
-    def classify(self, text: str) -> tuple[str, str, float, bool]:
-        """请模型判一次：(kind, theme, confidence, urgent)。"""
+    def classify(self, text: str, speaker: str = SPEAKER_USER) -> tuple[str, str, float, bool]:
+        """请模型判一次：(kind, theme, confidence, urgent)。
+
+        ``speaker``（v2-social-card-base）：这句话是谁说的。默认 ``"user"``——主聊天那条线
+        一个字都不改；帮聊那条线传 ``"peer"``，问的就变成"**对方**这句话要不要帮忙"
+        （对方在邀约 / 在问事 / 在求助），判定规则与词表完全一样，只是提示词里的主语换人。
+        """
         provider = LLMFactory.create(self._config)
         categories = "、".join(self._config.card.categories)
         data = provider.chat_json(
-            SERVICE_INTENT_PROMPT.format(categories=categories, text=text),
+            SERVICE_INTENT_PROMPT.format(
+                categories=categories, text=text, speaker=speaker_label(speaker)
+            ),
             system=INTENT_SYSTEM,
         )
         kind = str(data.get("kind") or "").strip()

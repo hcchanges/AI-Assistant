@@ -97,6 +97,7 @@ OFFLINE = (
     "test_social_session_sync_fg.py",
     "test_social_continuous.py",
     "test_social_tone_adaptive.py",
+    "test_social_card_base.py",
     "test_multimodal.py",
     "test_mood_fix.py",
     "test_mood_horror.py",

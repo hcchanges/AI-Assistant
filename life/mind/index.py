@@ -1,7 +1,9 @@
 """碎片向量索引（S1）：语义召回的那条腿，放在 chroma 里。
 
 跟旧向量库（memory/vector.py）的关系：同一个库目录（data/chroma）、同一台 chroma，
-只是另起一个 collection ``mind_fragments``，metadata 里只放 ``fragment_id``。
+只是另起一个 collection ``mind_fragments``，metadata 里只放 ``fragment_id``
+（v2-social-card-base 起，按对端分格的那些另带一格 ``peer``——是摘要不是名字，
+见 `store._peer_key`；主人自己那一档不带这一格，`search` 空 peer 就不加 `where`）。
 复用现成的 chromadb + bge-small-zh-v1.5，不新增任何依赖。
 
 **正文不进这里，只进向量。** 这一条是有意的，不是省事：
@@ -73,28 +75,44 @@ class MindVectorIndex:
 
     # ---------- 写 ----------
 
-    def add(self, fragment_id: int, text: str) -> None:
-        """给一条碎片算向量。正文用完就丢，只把向量写进去。"""
+    def add(self, fragment_id: int, text: str, peer: str = "") -> None:
+        """给一条碎片算向量。正文用完就丢，只把向量写进去。
+
+        ``peer``（v2-social-card-base）：这条碎片属于**哪一格**（跟 mind.db 里
+        `fragment.peer` 同一个键，见 `store._peer_key`）。**空串不写进 metadata**——
+        主人自己那一档（含所有加这一列之前的老条目）就没有这一格，按它检索时不加
+        `where`（见 `search`），老的照旧全召回。
+        """
         if not text or not text.strip():
             return
+        meta: dict[str, Any] = {"fragment_id": int(fragment_id)}
+        if peer:
+            meta["peer"] = str(peer)
         self._collection.upsert(
             ids=[str(fragment_id)],
             embeddings=[self._ef([text])[0]],
-            metadatas=[{"fragment_id": int(fragment_id)}],
+            metadatas=[meta],
         )
 
-    def add_many(self, items: Sequence[tuple[int, str]]) -> int:
+    def add_many(self, items: Sequence[tuple[int, str]], peer: str = "") -> int:
         """批量补算（S3）。已经在索引里的跳过，所以重复调用是幂等的。
 
         返回这次真正补了几条——调用方（回归 / 日志）靠它确认"补过了"而不是"又补一遍"。
+        `peer` 口径与 `add` 一致（空串 = 不带这一格）。
         """
         pending = [(fid, text) for fid, text in items if text and text.strip() and not self.has(fid)]
         if not pending:
             return 0
+        metas: list[dict[str, Any]] = []
+        for fid, _ in pending:
+            meta: dict[str, Any] = {"fragment_id": int(fid)}
+            if peer:
+                meta["peer"] = str(peer)
+            metas.append(meta)
         self._collection.upsert(
             ids=[str(fid) for fid, _ in pending],
             embeddings=list(self._ef([text for _, text in pending])),
-            metadatas=[{"fragment_id": int(fid)} for fid, _ in pending],
+            metadatas=metas,
         )
         return len(pending)
 
@@ -104,17 +122,28 @@ class MindVectorIndex:
         got = self._collection.get(ids=[str(fragment_id)])
         return bool(got.get("ids"))
 
-    def search(self, query: str, top_k: int = DEFAULT_TOP_K) -> list[int]:
-        """按语义找回 fragment_id，最近的在前。够不上闸门的直接不要。"""
+    def search(
+        self, query: str, top_k: int = DEFAULT_TOP_K, peer: str = ""
+    ) -> list[int]:
+        """按语义找回 fragment_id，最近的在前。够不上闸门的直接不要。
+
+        ``peer``（v2-social-card-base）：只看**那一格**的碎片。空串（默认）= 不按对端分，
+        老行为一字未变——**这一点是有意的**：老条目（加这一列之前写进去的）身上根本没有
+        `peer` 这一格，一加 `where` 就一条都召不回来，等于把历史记忆全挡在门外。
+        """
         raw = (query or "").strip()
         total = self._collection.count()
         if not raw or not total:
             return []
+        kwargs: dict[str, Any] = {}
+        if peer:
+            kwargs["where"] = {"peer": str(peer)}
         result = self._collection.query(
             # 查询侧带 bge 建议的前缀（见 OnnxChineseEmbedding.embed_query）
             query_embeddings=[self._ef.embed_query([raw])[0]],
             n_results=min(top_k, total),
             include=["distances", "metadatas"],
+            **kwargs,
         )
         ids = (result.get("ids") or [[]])[0]
         distances = (result.get("distances") or [[]])[0]

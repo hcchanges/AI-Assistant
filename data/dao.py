@@ -32,6 +32,25 @@ from data.models import (
     User,
 )
 
+# 对象攻略卡那四个结构化格子（v2-social-card-base）。放这儿是因为读写两头都要认它：
+# 建卡时（`CardDAO.add`）与后补时（`CardDAO.set_profile`）。
+_PROFILE_COLUMNS = ("likes", "dislikes", "strategy", "relation_stage")
+
+
+def _profile_columns(profile: dict[str, str] | None) -> dict[str, str]:
+    """把"对象档案"那本字典收成能直接丢给 `Card(...)` 的四个关键字。
+
+    认不出的键直接丢掉、空值不写（跟 `set_profile` 同一个口径）：批量传一本大字典
+    进来不该把不相干的列一起写脏。`None` / 不是字典 → 一个关键字都不给，四列留 NULL。
+    """
+    if not isinstance(profile, dict):
+        return {}
+    return {
+        key: str(profile[key]).strip()
+        for key in _PROFILE_COLUMNS
+        if profile.get(key) is not None and str(profile[key]).strip()
+    }
+
 
 class UserDAO:
     def __init__(self, session_factory: sessionmaker):
@@ -460,6 +479,7 @@ class CardDAO:
         goal: str = "",
         persona_id: str | None = None,
         icon: str | None = None,
+        profile: dict[str, str] | None = None,
     ) -> Card:
         now = datetime.now()
         with self._session_factory() as session:
@@ -478,6 +498,8 @@ class CardDAO:
                 plaza_pos=int(top) + 1,
                 created_at=now,
                 updated_at=now,
+                # 对象档案那四格（v2-social-card-base）：不传就是 NULL，九类卡一视同仁
+                **_profile_columns(profile),
             )
             session.add(card)
             session.commit()
@@ -530,6 +552,27 @@ class CardDAO:
                 return
             card.kb_path = kb_path
             card.updated_at = datetime.now()
+            session.commit()
+
+    def set_profile(self, card_id: int, **fields: str) -> None:
+        """写这张卡的对象档案那四格（v2-social-card-base）：喜好 / 禁忌 / 攻略策略 / 关系阶段。
+
+        只更新这次给到的（`None` / 空串跳过），其余留着——跟 `MindStore.save_profile`
+        一个口径：聊到一点补一点，别把上一轮填的抹掉。卡不存在就什么都不做。
+        """
+        patch = {
+            key: str(value).strip()
+            for key, value in fields.items()
+            if key in _PROFILE_COLUMNS and value is not None and str(value).strip()
+        }
+        if not patch:
+            return
+        with self._session_factory() as session:
+            session.execute(
+                update(Card)
+                .where(Card.id == card_id)
+                .values(**patch, updated_at=datetime.now())
+            )
             session.commit()
 
     def set_archived(self, card_id: int, archived: bool) -> None:

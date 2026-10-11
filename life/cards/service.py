@@ -545,7 +545,14 @@ class CardService:
             )
         return moved
 
-    def create_manual(self, category: str, title: str, icon: str, description: str) -> str:
+    def create_manual(
+        self,
+        category: str,
+        title: str,
+        icon: str,
+        description: str,
+        profile: dict[str, str] | None = None,
+    ) -> str:
         """手动建一张卡（指令 13 第 6 节；指令 25-A 第 3 项改成三步）。
 
         三步：选大类（9 选 1）→ 卡名（默认大类名，用户可改，≤10 字）→ 图标 + 一句话描述。
@@ -555,16 +562,28 @@ class CardService:
         **同类同名已经有了一张就返回那一张的名字，不再重复建**（v2-social-card-dedup，
         判据见 `find_card`）——调用方据此也能认出"这不是新建，是本来就有"。
         """
-        card = self.create_manual_card(category, title, icon, description)
+        card = self.create_manual_card(category, title, icon, description, profile=profile)
         return card.title if card is not None else ""
 
-    def create_manual_card(self, category: str, title: str, icon: str, description: str) -> Card | None:
+    def create_manual_card(
+        self,
+        category: str,
+        title: str,
+        icon: str,
+        description: str,
+        profile: dict[str, str] | None = None,
+    ) -> Card | None:
         """同 `create_manual`，但返回**整张卡**（不是卡名）——要往卡专属知识库写东西
         的调用方（比如对象攻略卡抽完信息要落库）需要拿到 `card.id` / `card.kb_path`。
         建不成返回 None。
 
         **同类同名已经有一张时返回的是那一张**（v2-social-card-dedup）：不重复建、不再
         写一条卡牌记忆；调用方拿到的是既有卡的 `id` / `kb_path`，写知识库照旧落到它身上。
+
+        ``profile``（v2-social-card-base）：建卡时一并写下的**对象档案**那四格
+        （喜好 / 禁忌 / 攻略策略 / 关系阶段，见 `data/models.py::Card`）。不传就是 NULL，
+        九类卡一视同仁。**同类同名撞上既有卡时也照写**——用户这次填的四格不能因为
+        "卡本来就有"丢掉；不传 profile 的老调用点行为一字未变。
         """
         category = (category or "").strip()
         if category not in LIFE_CATEGORIES:
@@ -582,6 +601,8 @@ class CardService:
                 "大类「%s」下已经有「%s」这张卡了（#%d），不再重复建",
                 category, final_title, existing.id,
             )
+            if profile:
+                self.set_profile(existing.id, **profile)
             return existing
         if self.personal_full():
             logger.info("活跃个人卡已满 %d 张，先收一张再建", PERSONAL_ACTIVE_MAX)
@@ -601,12 +622,23 @@ class CardService:
             # 自建卡一般归宠物本体；命理那类归玄机先生（见 _owner_persona）
             persona_id=self._owner_persona(category),
             icon=icon,
+            profile=profile,
         )
         self._attach_kb(card)
         self._remember_card(card, category)
         self._bus.card_changed.emit()
         logger.info("手动建卡 #%d：%s（大类 %s）", card.id, card.title, category)
         return card
+
+    def set_profile(self, card_id: int, **fields: str) -> None:
+        """后补这张卡的对象档案那四格（v2-social-card-base）。
+
+        跟建卡时传 `profile=` 是一回事，区别只是卡已经在手上了（比如"先建卡、再抽信息"
+        那种两步走的调用方）。只写这次给到的，其余留着；认不出的键、空值都跳过
+        （口径见 `data/dao.py::CardDAO.set_profile`）。不碰专属知识库、不发事件——
+        那四格是**给人看 / 给起草取用**的档案，不是卡面。
+        """
+        self._card_dao.set_profile(card_id, **fields)
 
     def accept_invite(self, category: str, title: str, icon: str) -> str:
         """邀请受理（指令 25-B 第 2 项）：按用户在确认框里改好的卡名建卡，并把邀请标为受理。

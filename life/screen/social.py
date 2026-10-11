@@ -83,11 +83,13 @@ from brain.prompts.templates import (
     SOCIAL_PROFILE_PROMPT,
     SOCIAL_PROFILE_SYSTEM,
     SOCIAL_TONE_HINT_BLOCK,
+    SPEAKER_PEER,
 )
 from core.config import Config
 from core.events import EventBus
 from core.worker import run_async
 from life.cards.templates import EMOTION_CATEGORY
+from life.dialog import router as dialog_router
 from life.psych import crisis
 # 点头的口径与抓屏笔记/游戏攻略共用一张表（"好呀""要""嗯"…），不另立一份，
 # 免得同一个按钮在三条线上判出三种结果。
@@ -894,6 +896,20 @@ def _tail_lines(text: object, limit: int = CHAT_CONTEXT_CLIP) -> str:
     return "\n".join(reversed(kept))
 
 
+def _last_peer_line(text: object) -> str:
+    """把一屏字里**最后那句非空的话**挑出来（v2-social-card-base）。
+
+    意图底座判的是"对方最新说的一句"，不是整屏材料——整屏喂进去，意图那条线对着
+    顶上几句旧话照样能判出个东西来，那跟"对方刚刚说了什么"不是一回事。就取末行，
+    空白行（气泡之间那几行）全跳过。
+    """
+    for line in reversed(str(text or "").splitlines()):
+        stripped = line.strip()
+        if stripped:
+            return stripped
+    return ""
+
+
 def _tail_context(read: ChatRead, limit: int = CHAT_CONTEXT_CLIP) -> str:
     """对方那半边：**按条**从末尾往前留，**最新那一条整条不切**。
 
@@ -1263,6 +1279,11 @@ class SocialReplyService(QObject):
         # **只存内存**：不落盘、不进任何库、不进日志（日志只记行数）——跟 `_chat_text`
         # 同一条隐私口径。`tone_align=off` 时这一格永远空着。
         self._peer_lines: dict[str, list[str]] = {}
+        # 对方最近那句话走的**规则**意图档（v2-social-card-base）：意图底座按说话者参数化
+        # 之后，帮聊这条线上传 `speaker="peer"` 的落点。**只存内存、只算不注入**——这条
+        # 规则路零延迟、不调模型、不碰库，下一批（v2-social-card-inject）的"对方意图"
+        # 那一格来取它。还没拟过任何一段时是 None。
+        self._peer_route = None
         self._chat_reading = False
         # 社交软件此刻在不在前台（v2-social-ocr-path）：主动求助那一拍靠它判断还值不值得
         # 再抓一屏。每次 on_foreground 都刷新，跟"冒不冒话"是两件事。
@@ -2921,6 +2942,17 @@ class SocialReplyService(QObject):
         # 对方当下的口吻（v2-social-tone-adaptive）：`tone_align=off` 时这一整段不参与，
         # 提示词与加它之前**逐字相同**。**先记这一拍的原话、再抽摘要**——刚刚这一句也
         # 算"他最近说过的"。
+        # **对方这句话的意图**（v2-social-card-base）：意图底座按说话者参数化之后，
+        # 帮聊这条线上的第一次真实调用，传的是 `speaker="peer"`——判的是**对方**那句，
+        # 不是主人那句（主人那句走 `handle_request`，仍是默认的 `"user"`）。
+        #
+        # 走的是**纯规则**那一路（`classify` 零延迟、不调模型、不碰库），所以本批只
+        # "算出来放着"：提示词与草稿一个字节都没变，留给下一批的"对方意图"那一格取用。
+        # 材料空（这一拍没认到对方的话）就留 None——同一个"宁可不注入，也别瞎猜"口径。
+        peer_line = _last_peer_line(chat_text)
+        self._peer_route = (
+            dialog_router.classify(peer_line, speaker=SPEAKER_PEER) if peer_line else None
+        )
         tone_hint = ""
         if self._tone_align_on():
             peer = self._cooldown_key()
