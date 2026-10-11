@@ -233,12 +233,22 @@ class ChatBubble(QWidget):
     offer_reply = Signal(str)      # 点了邀请的轻按钮，内容是"好呀"或"不用了"
     offer_hidden = Signal(str)     # 那排轻按钮退休了，内容是它原来归哪条线（v2-social-scene-boundary）
     copy_requested = Signal(str)   # 点了「复制回复」，内容是要抄进剪贴板的正文（v2-social-chat-ui-copy）
+    help_exit_requested = Signal() # 点了「不用帮了」：退出帮聊（v2-social-exit-easy）
     user_left = Signal()           # 用户离开这一则：气泡失焦 / 被收起（v2-social-card-timeout）
     user_back = Signal()           # 用户回到这一则：气泡又被激活（v2-social-card-timeout）
 
     OFFER_YES = "好呀"
     OFFER_NO = "不用了"
     COPY_LABEL = "复制回复"        # 帮聊正文下面那个按钮的字（批次11 需求6）
+    # 「不用帮了」：这一则右下角、挨着「复制回复」的那个**随时能按的出口**
+    # （v2-social-exit-easy）。进过帮聊窗口之后，对方每来一句都自动出候选，可这一场
+    # 到底还帮不帮、什么时候停，**原来只有"点那排按钮里的 [不用了]"这一个机会**
+    # ——那一排只在**还没进窗口**时摆得出来（进了之后 `_ask_offer` 就被 `_is_helping()`
+    # 挡下，不再问），按过一次 [好呀] 之后就再也见不着了。于是想收手只能关气泡
+    # （`close_bubble` 不动服务那一格，下一句照样自动出候选）或者干脆关掉桌宠。
+    # 按字面比 [不用了] 直白的是「不用帮了」，但它必须**长在那一则上**：那一则就是
+    # "正在帮"的物证，出口跟它同处一屏，才叫"随时能退"。
+    EXIT_LABEL = "不用帮了"
 
     def __init__(self, pet_name: str, parent: QWidget | None = None):
         super().__init__(parent, Qt.Tool | Qt.FramelessWindowHint | Qt.WindowStaysOnTopHint)
@@ -432,7 +442,10 @@ class ChatBubble(QWidget):
         - **内层框**（细边 1px、留白 6px）——只装**正文**，能直接粘走的那句；
         - 内层下方、外层之内——**解析**（灰字，跟系统提示同一档色）；
         - 外层右下角——「复制回复」按钮（样式照旧借 `ChatOffer`，信号链一个字没改：
-          `clicked` → `_copy_clicked` → `copy_requested` → 装配层那只手写剪贴板）。
+          `clicked` → `_copy_clicked` → `copy_requested` → 装配层那只手写剪贴板），
+          **旁边再摆一个「不用帮了」**（v2-social-exit-easy）：那一则就是"正在帮"的
+          物证，出口跟它同处一屏才叫"随时能退"；两个按钮一行、一个 `addStretch`
+          靠右，「复制回复」仍在最右（主操作的位置没动）。
 
         条目的 `DisplayRole` 文本照旧给"正文 + 空行 + 解析"（跟 `social_draft_text` 一个
         口径）：那一则是靠控件显示的，这行文本不画，但它是"气泡里写着什么"这个问法的
@@ -503,12 +516,21 @@ class ChatBubble(QWidget):
         note_label.setStyleSheet(f"color: {TEXT_MUTED}; background: transparent; border: none;")
         outer.addWidget(note_label)
 
-        # 右下角：复制回复（照 `_offer_row` 那排轻按钮的写法）
+        # 右下角：不用帮了 + 复制回复（照 `_offer_row` 那排轻按钮的写法）
         row = QWidget(card)
         row_layout = QHBoxLayout(row)
         row_layout.setContentsMargins(0, 0, 0, 0)
         row_layout.setSpacing(6)
         row_layout.addStretch(1)
+        # 出口摆在**左边**：「复制回复」是这一则的主操作，位置一点不动（老用户的手感不变），
+        # 出口挨在它旁边。样式同样借 `ChatOffer`——两个都是"轻轻一点"的二级按钮，
+        # 谁也不比谁重（出口做成红的 / 加粗的，反倒像是个危险操作，它不是：按下去
+        # 什么都不会被删，只是不再替你写）。
+        exit_button = QPushButton(self.EXIT_LABEL, row)
+        exit_button.setObjectName("ChatOffer")
+        exit_button.setCursor(Qt.PointingHandCursor)
+        exit_button.clicked.connect(self._exit_clicked)
+        row_layout.addWidget(exit_button)
         button = QPushButton(self.COPY_LABEL, row)
         button.setObjectName("ChatOffer")
         button.setCursor(Qt.PointingHandCursor)
@@ -688,6 +710,19 @@ class ChatBubble(QWidget):
         """
         if self._copy_text:
             self.copy_requested.emit(self._copy_text)
+
+    def _exit_clicked(self) -> None:
+        """点了「不用帮了」：把"用户要退出来"这件事报给装配层（v2-social-exit-easy）。
+
+        这里**不摘卡片、不碰服务状态、不写库**——跟 `_copy_clicked` 同一个口径：气泡只报
+        "用户按了哪一下"，改状态的手全在装配层（`_on_social_help_exit`）。这么做还有一层
+        必要：退出成不成得看服务那一格**原来在不在帮**，界面自己判不了（它有 `_copy_text`，
+        可"这一场进没进过帮聊窗口"不在它手上）。
+
+        不判 `self._busy`：起草那一趟正跑着也可能想收手（那一刻按钮就是灰的也没关系，
+        点得着就点得动）。服务那边 `exit_helping()` 是幂等的，连点两下第二下什么都不做。
+        """
+        self.help_exit_requested.emit()
 
     def apply_speaker(self, speaker: str) -> None:
         """换说话人：标题与回复前缀都跟着变（指令 14 的角色标识）。"""

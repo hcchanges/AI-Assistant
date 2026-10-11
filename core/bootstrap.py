@@ -221,6 +221,15 @@ _leak_dump_ts = None               # 上一次落图的时刻（模块级，首�
 # 要紧的一处防错点（宁可多留，也不误清）。
 CARD_CLEAR_S = 180.0
 
+# ---- 用户按了「不用帮了」之后补的那一句（v2-social-exit-easy）----
+# 退出是**随时能按**的（那一则的右下角），按下去这一则就摘了、自动出候选那条腿也停了。
+# 跟邀请过期那一句同一个道理，得交代一声：**不交代，用户会以为"这一下把刚才记的那些
+# 东西也删了"**——那一则上写着"我手上关于他的记录：…"，摘掉它而不说清，就成了
+# "宠物把知道的吐出来了、又什么都不剩"。所以这一句要把**退的是什么**说清楚：退的是
+# "接着帮"，不是"记没记过"；还想再要一段，路就在那儿。
+HELP_EXIT_NOTE = ("（好，不替你写了——刚才记下的那些一条没删，"
+                  "想再要一段就点那排按钮或者跟我说一声）")
+
 
 def social_draft_body(draft: str) -> str:
     """候选正文那一则（v2-social-chat-ui-copy 批次11：从 `social_draft_text` 里拆出来）。
@@ -1024,6 +1033,10 @@ class DesktopPetApp:
         # **这是写剪贴板的唯一时机**（批次11 起不再在生成那一刻静默写一次），
         # 走的还是装配层那只**只写不读**的手。
         self.chat_bubble.copy_requested.connect(self._on_social_copy)
+        # 那一则右下角挨着的「不用帮了」（v2-social-exit-easy）：点了就退出帮聊窗口。
+        # 界面只报"用户按了哪一下"，退服务那一格、摘这一则、补交代全在装配层这一头
+        # （理由见 `ChatBubble._exit_clicked`）。
+        self.chat_bubble.help_exit_requested.connect(self._on_social_help_exit)
         # 帮聊那一则的 3 分钟清理线（v2-social-card-timeout）：气泡失焦 / 被收起 = 用户
         # 离开对话窗口，重新被激活 = 回来。两条都只转发事件，界面行为一个字没改。
         # v2-social-card-timeout-absolute 起，这两声只改 `_card_away` 这个事实——那只
@@ -2063,6 +2076,53 @@ class DesktopPetApp:
         self._card_copied = True
         self._card_away = False
         self._card_clear_timer.stop()
+
+    def _on_social_help_exit(self) -> None:
+        """用户按了那一则右下角的「不用帮了」（v2-social-exit-easy）。
+
+        **先问服务、再动界面**：这一场到底在不在帮，界面判不了（"进没进过帮聊窗口"那
+        一格在服务手上，`_copy_text` 只说明"这一则有正文"）——`exit_helping()` 返回
+        False 就一点动静都不该有：连点两下第二下什么都不做，本来没在帮时按下也什么都不
+        做（不会凭空冒半句"好，不替你写了"）。
+
+        真退出来了才做两件事，顺序有讲究：
+
+        1. **摘那一则**（`clear_social_draft`）——那一则是"正在帮"的物证，退了还摆在屏上，
+           用户下一句照样以为宠物在替他写。顺手把那只**绝对 180 秒的表**撤掉
+           （`_card_open` 放倒 + `stop()`）：卡片已经没了，还留一只到点会喊"清卡片"的表，
+           等于埋一颗到点空响的哑炮。
+        2. **补一句交代**（`HELP_EXIT_NOTE`）——那一则上写着"我手上关于他的记录：…"，
+           摘掉它而不说清，就成了"宠物把知道的吐出来了、按个按钮又什么都不剩"。所以要
+           明说：退的是"接着帮"，不是"记没记过"（理由见那个常量）。
+
+        **跟 3 分钟那条收尾路（`_on_card_clear_due`）有一处刻意的不同：框不关。**
+        那条的判据是"离开满 180 秒"——人早走开了，窗口留着就是一只空壳，所以它最后
+        `close_bubble()`。这一条反过来：用户**正坐在框跟前按的这一个按钮**，框是他的
+        对话窗、这一句交代也正要用它看——把框收掉是"夺回控制"的反面。
+
+        **只收"帮聊自己那排按钮"**（主题以 `social` 开头时 `hide_offer()`）：它跟这一则
+        同属帮聊这条线，一起退才不会留下"按钮还挂着、服务那一格已经空了"的错位。别的线
+        摆在上面的按钮一个字不动（跟 `_on_card_clear_due` 同一个判据）：那一问不是我的，
+        替用户作废掉，那几条线就再也点不着了。
+
+        **不管手上那一趟**：这一下不碰 `_running` / `_awaiting`（那是服务的闸门，界面
+        伸手去改就会把"一次只拟一段"弄坏）。所以有一种情形是挡不住的：**按下去的那一刻
+        手上正有一趟起草在跑**（上一则有正文、下一趟已在路上），那一趟到点照样上屏。
+        这是如实记账——退掉的是"往后每一句都自动出候选"这条腿和那一问，不是"已经出门
+        在路上的那一封"；那一段真冒出来了，用户看着不满意再按一下就是了（幂等）。
+        """
+        service = getattr(self, "social_reply", None)
+        if service is None or not service.exit_helping():
+            return
+        self.chat_bubble.clear_social_draft()
+        self._card_open = False
+        self._card_copied = False
+        self._card_away = False
+        self._card_clear_timer.stop()
+        if getattr(self.chat_bubble, "offer_theme", "").startswith("social"):
+            self.chat_bubble.hide_offer()
+        self.chat_bubble.append_note(HELP_EXIT_NOTE)
+        logger.debug("帮聊退出：卡片摘了、这一场不再自动出候选（框留着给用户看这句交代）")
 
     # ---------- 帮聊那一则：上屏满 3 分钟就清掉（v2-social-card-timeout-absolute） ----------
 

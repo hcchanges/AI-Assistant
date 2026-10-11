@@ -99,6 +99,7 @@ OFFLINE = (
     "test_social_tone_adaptive.py",
     "test_social_card_base.py",
     "test_social_card_inject.py",
+    "test_social_exit_easy.py",
     "test_multimodal.py",
     "test_mood_fix.py",
     "test_mood_horror.py",

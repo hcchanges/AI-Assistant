@@ -1504,18 +1504,26 @@ def main() -> int:
               note_label is not None and note_label.parent() is card
               and f"color: {bubble_mod.TEXT_MUTED}" in note_label.styleSheet(),
               note_label.styleSheet() if note_label is not None else "（没解析）")
-        button = card.findChild(QPushButton, "ChatOffer") if card is not None else None
+        # v2-social-exit-easy：那一行现在挂着**两只** `ChatOffer`（「不用帮了」＋「复制回复」），
+        # `findChild` 取回来的是**先建的那一只**（出口），所以这里改走 `_copy_button`——
+        # 它本来就是"手上那一版正文对应哪只按钮"的唯一凭据（`clear_social_draft` 一并作废）。
+        # 断言的意思一个字没改：复制回复长在这一则**里面**。
+        button = app.chat_bubble._copy_button
         check("★ 「复制回复」长在这一则**里面**（不再是气泡底部的固定控件）",
-              button is not None and card.isAncestorOf(button)
+              button is not None and card is not None and card.isAncestorOf(button)
               and button.text() == app.chat_bubble.COPY_LABEL,
               f"{button.text() if button is not None else '（没按钮）'}")
         row = app.chat_bubble._copy_row
         cells = ([row.layout().itemAt(i) for i in range(row.layout().count())]
                  if row is not None else [])
-        check("按钮压在外层框的**右下角**（左边先撑一个弹簧、按钮在它后面）",
+        # 三格：弹簧 →「不用帮了」（v2-social-exit-easy 加的出口）→「复制回复」。
+        # 「复制回复」仍在最右（主操作的位置没动），出口挨在它左边。
+        check("按钮压在外层框的**右下角**（左边先撑一个弹簧，出口与复制回复排在它后面）",
               row is not None and row.parent() is card
-              and len(cells) == 2 and cells[0].spacerItem() is not None
-              and cells[1].widget() is button,
+              and len(cells) == 3 and cells[0].spacerItem() is not None
+              and cells[1].widget() is not None
+              and cells[1].widget().text() == app.chat_bubble.EXIT_LABEL
+              and cells[2].widget() is button,
               f"按钮那一行 {len(cells)} 格："
               f"{['弹簧' if c.spacerItem() is not None else type(c.widget()).__name__ for c in cells]}")
         # 整框找一遍"复制回复"：就长在那一则里的这一只。别的 `ChatOffer` 是 [好呀] [不用了]
@@ -1552,7 +1560,10 @@ def main() -> int:
             pnote = pcard.findChild(QLabel, "ChatDraftNote") if pcard is not None else None
             pbody = pcard.findChild(QFrame, "ChatDraftBody") if pcard is not None else None
             prow = probe_bubble._copy_row
-            pbutton = pcard.findChild(QPushButton, "ChatOffer") if pcard is not None else None
+            # v2-social-exit-easy：那一行多了「不用帮了」，`findChild` 取回的是先建的那一只
+            # （出口，挨左边），而下面几条断言问的是**「复制回复」压没压在右下角**——所以
+            # 指到 `_copy_button` 上（它就是要粘的那一版正文对应哪只按钮的唯一凭据）。
+            pbutton = probe_bubble._copy_button
             ready = None not in (pcard, pnote, pbody, prow, pbutton)
 
             check("★ 卡片高**不是**按不折行量出来那个值（老口径会矮一截，解析末行被裁）",
