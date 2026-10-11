@@ -1007,17 +1007,98 @@ def chat_area_box(image, dpr: float = 1.0, left: int | None = None) -> tuple[int
 # 那张图是两块。
 TITLE_BAND_PX = 34
 
+# v2-social-leftedge-fix：**这一刀跟着名字走**。原先带子的左沿直接取 `_chat_left`（跟聊天区
+# 同一条边），可那条边**会漂**：真机那批帧上它在 92 / 164 / 263 / 465 之间来回跳——聊天区里
+# 一条大气泡把"连着几十列都是空列"那条腿顶到气泡右缘去了（那几帧真机读数就是 92 ↔ 254）。
+# 带子按它裁，同一场的两拍就裁出**两块不同的像素**：指纹变 → 名字被当成"换了场"清掉（下一拍
+# 又认回来，键在「微信|茗风」与「微信」之间来回抖）；左沿跳到名字右边那几拍更糟——带子里
+# 压根没有名字，OCR 只能回 0 字，名字只好退回裸会话标识。
+#
+# 名字那一行**自己的位置**并不漂：漂的是"聊天区左沿量在哪儿"。所以左沿改成**锚在名字身上**
+# ——在带子那几行里找**第一笔墨**，从那儿起裁。同一场里名字没动，锚点就不动，指纹也就稳了
+# （红线：**左沿漂、指纹不漂**）。
+TITLE_INK_TOL = 24           # 一个像素与这一行底色差多少（任一分量）才算"有墨"
+TITLE_INK_SAMPLES = 17       # 每列抽这么多个行（带子只有几十行高，抽稀够用）
+TITLE_INK_ROWS = 2           # 一列至少这么多抽样行有墨，才算"这一列有墨"（一两颗抗锯齿散点不算）
+TITLE_NAME_PAD_PX = 8        # 锚到第一笔墨之后，再往左让这么多（物理像素）：把字边的抗锯齿带上
+TITLE_NAME_BACK_PX = 240     # 单页那一档：左沿被大气泡顶到右边时，回头找名字最多回溯这么远（逻辑像素）
+TITLE_NAME_SCAN_PX = 300     # 找"第一笔墨"最多往右扫这么远（逻辑像素）——扫不到就当这一帧没有名字
+TITLE_LAYOUT_TOL_PX = 8      # "量出来的左沿算不算落在版面常数那一档"的容差（逻辑像素）
+
+
+def _column_has_ink(image, x: int, top: int, cut: int, bg, step: int) -> bool:
+    """标题带里**这一列有没有字**：抽样行里与底色差得开的够 `TITLE_INK_ROWS` 个就算有。
+
+    只看"差得开"、不看谁深谁浅：深色主题下字比底浅，浅色主题下字比底深，两边都得认。
+    """
+    hit = 0
+    for y in range(top, cut, step):
+        rgb = _pixel(image, x, y)
+        if rgb is None:
+            continue
+        if max(abs(rgb[0] - bg[0]), abs(rgb[1] - bg[1]), abs(rgb[2] - bg[2])) >= TITLE_INK_TOL:
+            hit += 1
+            if hit >= TITLE_INK_ROWS:
+                return True
+    return False
+
+
+def _title_name_left(image, dpr: float, left: int, top: int, cut: int, right: int) -> int:
+    """带子那一行的左沿**锚到名字身上**（v2-social-leftedge-fix）。量不出来就原样回 `left`。
+
+    为什么不能直接用 `left`：它是"聊天区左沿量在哪儿"，会被聊天区里一条大气泡顶到右边去
+    （真机 92 ↔ 254），而名字那一行自己的位置一个字没动。锚在名字上 → 同一场同一名字，
+    锚点就一样 → 带子的像素一样 → 指纹稳（调用方 `_peer_band_changed` 才不会误判换场）。
+
+    找名字的窗口左端分两档，**会话列表那一列在两档里都被挡住**：
+
+      · **版面常数那一档**（`left` 已经落在 `SIDEBAR_PX + CHAT_LIST_PX` 附近）：窗口左端取
+        `min(left, 版面常数)`——会话列表那一列是被**那个常数**挡在外面的，**不靠测量**，
+        所以主窗上量出来的左沿再怎么漂，带子也进不了别人的名字和预览；
+      · **单页那一档**（`left` 明显在版面常数左边）：会话列表压在别的页下面，聊天区从图标栏
+        右边就开始了。这一档的窗口左端可以回溯到 `left` 左边（最多 `TITLE_NAME_BACK_PX`），
+        但**绝不到图标栏里**（那儿的头像会被当成名字）——大气泡正是把左沿顶到名字右边的
+        那几拍，回头找才捞得回名字。
+
+    窗口里**从头往右找第一笔墨**：它就是名字（窗控 / 「更多」都在名字右边；这一条跟
+    `_band_leftmost_text` 取最靠左那一行是同一个口径）。找不到墨（这一行真的没字 / 量不出来）
+    就原样回 `left`——老口径一个字没改，一个字都不猜。
+    """
+    scale = _scale(dpr)
+    floor = int((SIDEBAR_PX + CHAT_LIST_PX) * scale)         # 版面常数：有会话列表列时聊天区的左沿
+    icon = int(SIDEBAR_PX * scale)                           # 图标栏右缘：找名字的地板
+    if left >= floor - int(TITLE_LAYOUT_TOL_PX * scale):
+        x0 = max(0, min(left, floor))
+    else:
+        x0 = max(icon, left - int(TITLE_NAME_BACK_PX * scale))
+    if right - x0 < 1 or cut - top < 1:
+        return left
+    bg, _frac = _band_fill(image, top, cut, x0, right)
+    if bg is None:
+        return left                                          # 这一带量不出底色：一个字都不猜
+    step = max(1, (cut - top) // TITLE_INK_SAMPLES)
+    stop = min(right, x0 + int(TITLE_NAME_SCAN_PX * scale))
+    for x in range(x0, stop):
+        if _column_has_ink(image, x, top, cut, bg, step):
+            return max(x0, x - int(TITLE_NAME_PAD_PX * scale))
+    return left
+
 
 def title_band_box(image, dpr: float = 1.0, left: int | None = None) -> tuple[int, int, int, int] | None:
     """一帧窗口画面 → 标题栏里那一行"对象名"的**取证带** `(x, y, w, h)`。Qt 无关。
 
-    几何跟 `chat_area_box` **同一条版面**，只把上沿往上抬 `TITLE_BAND_PX`：左 `_chat_left`
-    （挡住会话列表那一列——那列里全是别人的名字和预览，绝不进这条带子）、右 `RIGHT_PAD_PX`、
-    下沿就是 `chat_area_box` 的上沿（`TITLE_BAR_PX` × scale），高 `TITLE_BAND_PX` × scale。
+    上沿 / 右沿 / 下沿跟 `chat_area_box` **同一条版面**：右 `RIGHT_PAD_PX`、下沿就是
+    `chat_area_box` 的上沿（`TITLE_BAR_PX` × scale），高 `TITLE_BAND_PX` × scale。
 
     底下那一条是**有意贴着切的**：下沿跟聊天区上沿**逐像素对齐**，这条带子跟聊天区之间不留
     缝也不重叠，所以"名字有没有混进材料"是几何上就成立的（带子里的像素一个都不在
-    `chat_area_box` 里）。左沿同理，紧贴 `_chat_left` 起。
+    `chat_area_box` 里）。
+
+    **左沿（v2-social-leftedge-fix 起跟从前不同）**：不再跟着 `_chat_left` 那条会漂的边，
+    改成**锚在名字身上**（`_title_name_left`：在带子这几行里找第一笔墨，从那儿起裁）——
+    会话列表那一列照旧挡在带子外面（靠版面常数挡，见 `_title_name_left`），但"聊天区左沿
+    量在哪儿"这一拍漂到别处去，带子的像素不会再跟着变。找不到名字（这一行没墨）时原样用
+    `left`，跟这一改之前一模一样。
 
     `left` 传了就用传进来的（跟 `chat_area_box` 共用同一份，省一趟重算）；不传才在内部量。
 
@@ -1032,6 +1113,9 @@ def title_band_box(image, dpr: float = 1.0, left: int | None = None) -> tuple[in
     left = max(0, min(int(left if left is not None else _chat_left(image, dpr)), width))
     right = max(0, min(width - int(RIGHT_PAD_PX * scale), width))
     if right - left < 1 or cut - top < 1:
+        return None
+    left = max(0, min(_title_name_left(image, dpr, left, top, cut, right), width))
+    if right - left < 1:
         return None
     return (left, top, right - left, cut - top)
 
