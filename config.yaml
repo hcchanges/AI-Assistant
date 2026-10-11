@@ -210,6 +210,9 @@ screen:
   focus_enabled: true
   focus_minutes: 25
   read_browser_title: true
+  # 社交起草的语气自适应（v2-social-tone-adaptive）：auto = 草稿顺对方当下的口吻说话；
+  # off = 整层关掉，行为与加它之前逐字相同。
+  tone_align: auto
   # ---- 画面情绪（CV 腿，S1~S7）----
   # 三档：off 完全不判 / local 本机离线判（默认）/ cloud 把这一帧发给多模态服务商。
   # local 会在 data/models/ 下加载中文 CLIP 的 ONNX 量化版（约 132MB，已 gitignore，

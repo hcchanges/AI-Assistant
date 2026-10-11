@@ -82,6 +82,7 @@ from brain.prompts.templates import (
     SOCIAL_DRAFT_SYSTEM,
     SOCIAL_PROFILE_PROMPT,
     SOCIAL_PROFILE_SYSTEM,
+    SOCIAL_TONE_HINT_BLOCK,
 )
 from core.config import Config
 from core.events import EventBus
@@ -1039,6 +1040,95 @@ def is_allowed_social_proc(proc: str | None) -> bool:
     return proc.strip().lower() in SOCIAL_ALLOWED_PROCS
 
 
+# ---------- 对方当下口吻的实时摘要（v2-social-tone-adaptive） ----------
+#
+# 起草的"语气"原先只有一条腿：用户手放进来的**静态范例**（`social_examples.py`）。范例
+# 学的是"这个人一贯怎么说话"，学不到"他这会儿是什么腔调"——对方刚甩一句"这么快就放弃
+# 啦？"，范例里没这条，模型就退回"固定人格 + 分析腔"的套路。这一层补的是**当下**：
+# 把**这一场**（按 `sid|peer` 分格，同 `_cooldown_key()`）最近听来的对方原话，照字面抽成
+# 一句特征串，喂进正文那一格，让草稿顺对方的节奏说话。
+#
+# **材料来源就是起草本来要用的那份 `chat_text`**——不新抓屏、不重跑 OCR、不发新请求；
+# 存下来的也只是抽出来的特征词，原文一个字都不留（`_peer_lines` 只存内存，进程一停就没了，
+# 不落盘、不进任何库，日志只记行数）。`tone_align=off` 时整层不参与：不记、不抽、不注入，
+# 提示词与加它之前逐字相同。
+
+#: 摘要只看对方最近几句
+TONE_WINDOW_LINES = 6
+#: 每一句进账本前截多少字（特征不看全文，长句留个头就够）
+TONE_LINE_CLIP = 120
+#: 每一场最多记多少行
+TONE_BUFFER_LINES = 24
+
+# 几张"看一眼就知道是哪一档"的短表：不引词典、不引分词、不做情感分析——那正是要避免的
+# "分析腔"。表短、判据粗，错了也就是少对一句，不会把方向带反。
+_TONE_PARTICLES = ("呀", "啦", "嘛", "哦", "喔", "哈", "嗯", "呗", "咯", "呐", "诶", "嘿", "嘞")
+_TONE_LAUGH = ("哈哈", "嘿嘿", "嘻嘻", "呵呵", "233", "hhh", "www", "~", "～")
+_TONE_NICKNAMES = ("宝贝", "亲爱的", "宝宝", "宝", "亲", "大佬", "老师", "同学",
+                   "小哥哥", "小姐姐", "哥哥", "姐姐")
+_TONE_FLIRT = ("人家", "讨厌", "哼", "抱抱", "陪陪", "想要", "么么")
+_TONE_PROBE = ("真的假的", "不会吧", "你是不是", "你怎么", "为什么", "到底",
+               "难道", "是不是", "骗我")
+
+
+def _has_face(text: str) -> bool:
+    """这一句里带不带表情（emoji / 颜文字那一带的符号）。
+
+    判据是**码位**，不是词表：emoji 那块（`U+1F300` 往上）、杂项符号那一带
+    （`U+2190`–`U+2BFF`，颜文字常用的 ☺ ✧ ❤ 都落在这儿）、以及变体选择符 `U+FE0F`。
+    汉字（`U+4E00` 起）与全角标点（`U+FF00` 那一带）全在这几条带之外，不误伤。
+    """
+    return any(ord(ch) >= 0x1F300 or 0x2190 <= ord(ch) <= 0x2BFF or ord(ch) == 0xFE0F
+               for ch in text)
+
+
+def _tone_features(lines: list[str]) -> str:
+    """对方这几句的**口吻特征**，拼成一句紧凑摘要；一句都没有就回空串。
+
+    纯函数：不碰盘、不碰库、不碰模型，喂什么判什么（测试直接调它）。五个维度——句长 /
+    语气词 / 表情 / 称呼 / 调性——全是"照字面就能认"的。调性只分四档（轻松偏撒娇 /
+    在试探 / 正经常规 / 日常），且**只输出"该怎么接话"用得上的那点信息**：不猜对方
+    安的什么心（那正是解析该干的活，归 `why`，不归正文）。
+    """
+    body = [line.strip() for line in lines if line and line.strip()]
+    if not body:
+        return ""
+    joined = "".join(body)
+    avg = sum(len(line) for line in body) / len(body)
+
+    parts: list[str] = []
+    if avg <= 10:
+        parts.append(f"短句（均{avg:.0f}字）")
+    elif avg >= 22:
+        parts.append(f"长句（均{avg:.0f}字）")
+    else:
+        parts.append(f"句长中等（均{avg:.0f}字）")
+
+    particles = [p for p in _TONE_PARTICLES if p in joined]
+    if particles:
+        parts.append("爱用" + "、".join(f"「{p}」" for p in particles[:3]) + "这类语气词")
+    face = _has_face(joined) or any(word in joined for word in _TONE_LAUGH)
+    if face:
+        parts.append("带表情/叠字笑声")
+    nicknames = [n for n in _TONE_NICKNAMES if n in joined]
+    if nicknames:
+        parts.append(f"会称呼「{nicknames[0]}」")
+
+    # 调性：三档取"最像的那一档"，都不明显就照实说"日常"。挑剔的话术要**配着问号**才算
+    # 试探——单一个"你怎么"后面可能是句陈述（"你怎么还没睡"是在关心，不是在盘问）。
+    flirty = len(particles) >= 2 or any(word in joined for word in _TONE_FLIRT)
+    probing = any(word in joined for word in _TONE_PROBE) and ("？" in joined or "?" in joined)
+    if flirty:
+        parts.append("调性轻松偏撒娇")
+    elif probing:
+        parts.append("调性在试探、等你表态")
+    elif avg >= 22 and not face and not particles:
+        parts.append("调性正经常规")
+    else:
+        parts.append("调性日常")
+    return "，".join(parts)
+
+
 class SocialReplyService(QObject):
     """社交软件前台时冒一句，用户在聊天里要草稿就写一段给他。**只提议、不代发。**"""
 
@@ -1110,6 +1200,11 @@ class SocialReplyService(QObject):
         # 那屏字是什么时候认回来的（v2-social-stale-guard）：起草时抓不成会拿它比一下
         # 新鲜度，过期的当没有。取走即归零（见 `_take_chat_text`）。
         self._chat_text_at = 0.0
+        # 这一场对方最近几句（v2-social-tone-adaptive）：键同 `_cooldown_key()`（这一场
+        # 是谁），值是从 `chat_text` 里截下来的原话行，只留最近 `TONE_BUFFER_LINES` 行。
+        # **只存内存**：不落盘、不进任何库、不进日志（日志只记行数）——跟 `_chat_text`
+        # 同一条隐私口径。`tone_align=off` 时这一格永远空着。
+        self._peer_lines: dict[str, list[str]] = {}
         self._chat_reading = False
         # 社交软件此刻在不在前台（v2-social-ocr-path）：主动求助那一拍靠它判断还值不值得
         # 再抓一屏。每次 on_foreground 都刷新，跟"冒不冒话"是两件事。
@@ -2712,6 +2807,40 @@ class SocialReplyService(QObject):
         )
         return True
 
+    # ---------- 对方当下口吻的实时摘要（v2-social-tone-adaptive） ----------
+
+    def _tone_align_on(self) -> bool:
+        """这一趟要不要做实时口吻对齐。配置里**明写 `off`** 才关——别的值（含写错一个
+        字母的）一律按 `auto` 算，功能不该因为一个笔误悄悄失效（默认档就是 `auto`）。"""
+        return self._config.screen.tone_align != "off"
+
+    def _remember_peer_lines(self, peer: str, chat_text: str) -> None:
+        """把这一拍认到的对方原话记进**这一场**的账本（只留最近 `TONE_BUFFER_LINES` 行）。
+
+        **同一份尾巴再送一遍就不重记**：自动那条路每一拍都把屏幕上最底下那条（可能就是
+        同一个人的同一条消息）再带回来一次，不去重的话账本会被同一句灌满，"最近六句"里
+        就只剩一句了。判据是**整份尾巴**相同（`fresh` 与账本末尾那几条逐字相等）——比
+        "只看最后一行"稳：对方一条消息折成两行时，尾巴是那两行一起送来的。
+        """
+        fresh = [line.strip()[:TONE_LINE_CLIP] for line in (chat_text or "").splitlines()]
+        fresh = [line for line in fresh if line]
+        if not fresh:
+            return
+        book = self._peer_lines.setdefault(peer, [])
+        if len(fresh) <= len(book) and book[-len(fresh):] == fresh:
+            return
+        book.extend(fresh)
+        del book[:-TONE_BUFFER_LINES]
+
+    def _peer_tone_summary(self, peer: str) -> str:
+        """**这一场**对方最近几句的口吻摘要；还没听够（账本是空的）就回空串——宁可不注入，
+        也别瞎猜一个腔调出来。
+
+        按 `_cooldown_key()`（= `sid|peer`）分格，跟冒话冷却 / 帮聊窗口同一个口径：换个
+        会话就是另一本账，**不串场**。
+        """
+        return _tone_features(self._peer_lines.get(peer, [])[-TONE_WINDOW_LINES:])
+
     # ---------- 起草 ----------
 
     def _provider(self):
@@ -2731,10 +2860,21 @@ class SocialReplyService(QObject):
         except Exception as exc:      # noqa: BLE001 —— 见上
             logger.debug("社交范例取不出来（%s），这一段不摆", exc)
             examples = ""
+        # 对方当下的口吻（v2-social-tone-adaptive）：`tone_align=off` 时这一整段不参与，
+        # 提示词与加它之前**逐字相同**。**先记这一拍的原话、再抽摘要**——刚刚这一句也
+        # 算"他最近说过的"。
+        tone_hint = ""
+        if self._tone_align_on():
+            peer = self._cooldown_key()
+            self._remember_peer_lines(peer, chat_text)
+            summary = self._peer_tone_summary(peer)
+            if summary:
+                tone_hint = SOCIAL_TONE_HINT_BLOCK.format(peer_tone_hint=summary)
         prompt = SOCIAL_DRAFT_PROMPT.format(
             chat_context=chat_text or NO_CHAT_CONTEXT,
             text=text,
             examples=(examples[:EXAMPLES_CLIP] or NO_EXAMPLES),
+            peer_tone_hint=tone_hint,
         )
         try:
             return self._provider().chat_json(prompt, system=SOCIAL_DRAFT_SYSTEM) or {}
