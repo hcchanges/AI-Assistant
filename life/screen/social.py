@@ -1066,9 +1066,38 @@ _TONE_PARTICLES = ("呀", "啦", "嘛", "哦", "喔", "哈", "嗯", "呗", "咯"
 _TONE_LAUGH = ("哈哈", "嘿嘿", "嘻嘻", "呵呵", "233", "hhh", "www", "~", "～")
 _TONE_NICKNAMES = ("宝贝", "亲爱的", "宝宝", "宝", "亲", "大佬", "老师", "同学",
                    "小哥哥", "小姐姐", "哥哥", "姐姐")
-_TONE_FLIRT = ("人家", "讨厌", "哼", "抱抱", "陪陪", "想要", "么么")
+
+#: 句长量级分档（按这一场的**平均字数**）——真机口径：极短 ≤10 / 短 11–18 /
+#: 中 19–30 / 长 >30。分档不只看均数：摘要里还会把**实测跨度**（最小–最大）带上，
+#: 模型手里才有"该写多短"的准数（v2-social-tone-length-align）。
+TONE_LEN_TINY = 10
+TONE_LEN_SHORT = 18
+TONE_LEN_MEDIUM = 30
+
+# —— 细分调性（v2-social-tone-length-align）用的几张短表 ——
+#: 撒娇 / 轻盈那一档：语气词成一串（≥2 个）、emoji 密、或直接出现这些词
+_TONE_CUTE = ("人家", "讨厌", "哼", "抱抱", "陪陪", "想要", "么么", "好不好",
+              "不要嘛", "嘛", "呀")
+#: 卖关子（同属"轻盈"，点出来更贴）
+_TONE_TEASE = ("你猜", "猜猜", "不告诉你", "保密", "卖个关子", "回头再说")
+#: 嘴贫 / 接招较劲那一档——真机复盘里桌宠**走偏**的那一路（对方撒娇，桌宠却这么回）。
+#: 只收"一眼就是这副腔调"的多字词，不收单字（"行了"会误伤"就行了"这类）。
+_TONE_BANTER = ("行行行", "行吧", "拉倒", "随你", "随便你", "爱咋咋", "你管", "少来",
+                "得了吧", "你行你上", "较劲", "抬杠", "啰嗦", "讨价还价")
+#: 较劲的半句：**配着问号**才算（跟试探那条同一个纪律）
+_TONE_BACKTALK = ("你说呢", "不是吗", "凭什么", "你以为", "谁说的", "关你", "怎么着",
+                  "管得着")
+#: 正经 / 公事那一档
+_TONE_BIZ = ("麻烦", "请问", "汇报", "方案", "确认", "安排", "会议", "对接", "流程",
+             "资料", "进度", "审批", "评审", "排期", "需求", "同步", "答复", "尽快", "辛苦")
 _TONE_PROBE = ("真的假的", "不会吧", "你是不是", "你怎么", "为什么", "到底",
                "难道", "是不是", "骗我")
+
+
+def _is_face(ch: str) -> bool:
+    """这一个字符算不算"表情"。判据是**码位**，不是词表——`_has_face` 与"按字取用"
+    的那一处（`_tone_features` 要把对方真用的那几个表情原样点出来）共用这一条。"""
+    return ord(ch) >= 0x1F300 or 0x2190 <= ord(ch) <= 0x2BFF or ord(ch) == 0xFE0F
 
 
 def _has_face(text: str) -> bool:
@@ -1078,52 +1107,81 @@ def _has_face(text: str) -> bool:
     （`U+2190`–`U+2BFF`，颜文字常用的 ☺ ✧ ❤ 都落在这儿）、以及变体选择符 `U+FE0F`。
     汉字（`U+4E00` 起）与全角标点（`U+FF00` 那一带）全在这几条带之外，不误伤。
     """
-    return any(ord(ch) >= 0x1F300 or 0x2190 <= ord(ch) <= 0x2BFF or ord(ch) == 0xFE0F
-               for ch in text)
+    return any(_is_face(ch) for ch in text)
 
 
 def _tone_features(lines: list[str]) -> str:
     """对方这几句的**口吻特征**，拼成一句紧凑摘要；一句都没有就回空串。
 
-    纯函数：不碰盘、不碰库、不碰模型，喂什么判什么（测试直接调它）。五个维度——句长 /
-    语气词 / 表情 / 称呼 / 调性——全是"照字面就能认"的。调性只分四档（轻松偏撒娇 /
-    在试探 / 正经常规 / 日常），且**只输出"该怎么接话"用得上的那点信息**：不猜对方
-    安的什么心（那正是解析该干的活，归 `why`，不归正文）。
+    纯函数：不碰盘、不碰库、不碰模型，喂什么判什么（测试直接调它）。判据全是"照字面
+    就能认"的，六个维度——**句长量级** / 语气词 / 表情 / 称呼 / **细分调性**（语气词
+    与 emoji 的密度都揉进调性那一档，不单列"亲密度"——那要猜，正是要避免的"分析腔"）。
+
+    调性分五档：轻松偏撒娇（撒娇轻盈）/ 嘴贫较劲 / 在试探（试探撩拨）/ 正经常规
+    （正经公事）/ 日常，且**只输出"该怎么接话"用得上的那点信息**：不猜对方安的什么心
+    ——那是 `why` 那格的活，归解析，不归正文。
     """
     body = [line.strip() for line in lines if line and line.strip()]
     if not body:
         return ""
     joined = "".join(body)
-    avg = sum(len(line) for line in body) / len(body)
+    lengths = [len(line) for line in body]
+    avg = sum(lengths) / len(lengths)
 
     parts: list[str] = []
-    if avg <= 10:
-        parts.append(f"短句（均{avg:.0f}字）")
-    elif avg >= 22:
-        parts.append(f"长句（均{avg:.0f}字）")
+
+    # 一、句长**量级**（v2-social-tone-length-align）：不只看均数，把**实测跨度**也带上。
+    # 真机复盘里"短句节奏没跟上"的病根就在这儿——对方 8–16 字/句，桌宠回成 26–40 字，
+    # 差 2–3 倍；光说一句"短句"它不知道该短到哪儿，带上跨度才有准数。
+    low, high = min(lengths), max(lengths)
+    if avg <= TONE_LEN_TINY:
+        size = "极短句"
+    elif avg <= TONE_LEN_SHORT:
+        size = "短句"
+    elif avg <= TONE_LEN_MEDIUM:
+        size = "中等句"
     else:
-        parts.append(f"句长中等（均{avg:.0f}字）")
+        size = "长句"
+    span = f"约{low}字" if low == high else f"约{low}–{high}字"
+    parts.append(f"惯用{size}（{span}）")
 
     particles = [p for p in _TONE_PARTICLES if p in joined]
     if particles:
         parts.append("爱用" + "、".join(f"「{p}」" for p in particles[:3]) + "这类语气词")
-    face = _has_face(joined) or any(word in joined for word in _TONE_LAUGH)
-    if face:
+
+    glyphs = [ch for ch in dict.fromkeys(joined) if _is_face(ch)][:3]
+    if glyphs:
+        parts.append("带表情" + "".join(glyphs))
+    elif any(word in joined for word in _TONE_LAUGH):
         parts.append("带表情/叠字笑声")
+
     nicknames = [n for n in _TONE_NICKNAMES if n in joined]
     if nicknames:
         parts.append(f"会称呼「{nicknames[0]}」")
 
-    # 调性：三档取"最像的那一档"，都不明显就照实说"日常"。挑剔的话术要**配着问号**才算
-    # 试探——单一个"你怎么"后面可能是句陈述（"你怎么还没睡"是在关心，不是在盘问）。
-    flirty = len(particles) >= 2 or any(word in joined for word in _TONE_FLIRT)
-    probing = any(word in joined for word in _TONE_PROBE) and ("？" in joined or "?" in joined)
-    if flirty:
-        parts.append("调性轻松偏撒娇")
-    elif probing:
-        parts.append("调性在试探、等你表态")
-    elif avg >= 22 and not face and not particles:
-        parts.append("调性正经常规")
+    # 二、细分**调性**（v2-social-tone-length-align）：原来只分"松弛 / 正经"，太粗——真机
+    # 复盘里对方是"撒娇轻盈、爱卖关子"，桌宠却走成"嘴贫接招较劲"，**同是 playful、气质
+    # 没贴住**。这一层把 playful 里的两路拆开，另加试探撩拨与正经公事。
+    #
+    # 优先级：试探 > 嘴贫 > 撒娇 > 正经公事 > 日常。试探排最前，是它的判据最窄（要同时
+    # 有试探话术**和**问号）；嘴贫排在撒娇前，是因为撒娇材料里那几味语气词（呀 / 嘛）
+    # 太常见，先判嘴贫才不会把"行行行，人家知道了嘛"这种算成撒娇。
+    has_q = "？" in joined or "?" in joined
+    probing = any(word in joined for word in _TONE_PROBE) and has_q
+    banter = (any(word in joined for word in _TONE_BANTER)
+              or (has_q and any(word in joined for word in _TONE_BACKTALK)))
+    cute = len(particles) >= 2 or len(glyphs) >= 2 or any(w in joined for w in _TONE_CUTE)
+    biz = any(word in joined for word in _TONE_BIZ)
+
+    if probing:
+        parts.append("调性在试探（试探撩拨那一路）")
+    elif banter:
+        parts.append("调性嘴贫较劲（在接招、讨价还价）")
+    elif cute:
+        tease = "、爱卖关子" if any(w in joined for w in _TONE_TEASE) else ""
+        parts.append(f"调性轻松偏撒娇（撒娇轻盈{tease}）")
+    elif biz or (avg >= TONE_LEN_MEDIUM and not glyphs and not particles):
+        parts.append("调性正经常规（正经公事那一路）")
     else:
         parts.append("调性日常")
     return "，".join(parts)

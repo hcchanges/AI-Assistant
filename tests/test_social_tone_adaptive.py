@@ -8,6 +8,13 @@
 这一批补的是**当下**那一层：把**这一场**（按 `sid|peer` 分格）最近听来的对方原话，
 照字面抽成一句口吻摘要（句长 / 语气词 / 表情 / 称呼 / 调性），当风格约束喂进正文那一趟。
 
+**v2-social-tone-length-align 又补了两维**（真机验收暴露的缺口）：①**句长量级**——原来只
+说"短句/长句"，模型不知道该短到哪儿；现在连同**实测跨度**（约 6–7 字）一起给，真机口径
+是"对方 8–16 字/句、桌宠 26–40 字/句，差 2–3 倍"。②**细分调性**——原来 playful 只有一档
+"轻松偏撒娇"，真机上对方是"撒娇轻盈、爱卖关子"，桌宠却走成"嘴贫接招较劲"；现在把
+playful 拆成撒娇轻盈 / 嘴贫较劲两路，另加试探撩拨与正经公事，并在提示词里加了
+"字数量级贴近对方""气质贴住细分调性"两条硬约束。
+
 **抽的是字面特征，不是"读心"**：一句"你怎么还没睡"不该被当成盘问——所以判据都写死
 在几张短表里（`_tone_features` 是纯函数，测试直接调它），不引词典、不引分词、不碰模型、
 **不做情感分析**（那正是要避免的"分析腔"；该猜对方安的什么心是 `why` 那格的活，归解析，
@@ -26,6 +33,7 @@ from __future__ import annotations
 
 import ast
 import inspect
+import re
 import sqlite3
 import sys
 from pathlib import Path
@@ -59,6 +67,9 @@ SERIOUS_LINES = [
 ]
 # 对方在试探那一档：挑剔的话术 + 问号
 PROBE_LINE = "真的假的？你不是说下周才走吗"
+# 嘴贫 / 接招较劲那一档：真机复盘里桌宠**走偏**的那一路（对方撒娇，桌宠却这么回）。
+# 这条素材用来做反向对照——对方真是这个腔调时才该判「嘴贫较劲」，别的一律不许。
+BANTER_LINES = ["行行行，随你吧", "你管我呢，少来"]
 # 起草模板自己的换行符（模板文件是 CRLF，渲染出来的提示词里就是 \r\n）
 SEP = "\r\n" if "\r\n" in smod.SOCIAL_DRAFT_PROMPT else "\n"
 
@@ -100,6 +111,44 @@ def main() -> int:
           _tone_features(["好呀~"]))
     check("★ 称呼认得出来", "称呼" in _tone_features(["宝贝在吗"]),
           _tone_features(["宝贝在吗"]))
+
+    # ---------- ①b 句长量级：光说"短/长"不够，要带上实测跨度 ----------
+
+    section("①b 句长量级：档位 + 实测跨度（真机缺口的第①条）")
+
+    relax_lo, relax_hi = min(map(len, RELAX_LINES)), max(map(len, RELAX_LINES))
+    relax_avg = sum(map(len, RELAX_LINES)) / len(RELAX_LINES)
+    check(f"★ 极短句那一档：档位与实测跨度都在（约{relax_lo}–{relax_hi}字）",
+          "极短句" in relax and f"约{relax_lo}–{relax_hi}字" in relax, relax)
+    serious_lo, serious_hi = min(map(len, SERIOUS_LINES)), max(map(len, SERIOUS_LINES))
+    check(f"★ 长句那一档同样带实测跨度（约{serious_lo}–{serious_hi}字）",
+          "长句" in serious and f"约{serious_lo}–{serious_hi}字" in serious, serious)
+    check("★ 跨度是**从材料量出来的**：换一份更长的材料，数字跟着变（不是写死的）",
+          f"约{serious_lo}–{serious_hi}字" not in relax
+          and f"约{relax_lo}–{relax_hi}字" not in serious,
+          f"{relax} / {serious}")
+    one = _tone_features(["就一句"])
+    check("反向对照：只有一句时跨度收成一个数（不写成'约3–3字'）",
+          "约3字" in one and "–" not in one.split("，")[0], one)
+
+    # ---------- ①c 细分调性：playful 里的两路要拆开 ----------
+
+    section("①c 细分调性：撒娇轻盈 / 嘴贫较劲 / 试探撩拨 / 正经公事 各归各")
+
+    check("★ 撒娇那一档点出「撒娇轻盈」", "撒娇轻盈" in relax, relax)
+    banter = _tone_features(BANTER_LINES)
+    check("★ 嘴贫接招那一档点出「嘴贫较劲」（桌宠走偏的那一路，得认得出来）",
+          "嘴贫较劲" in banter, banter)
+    check("★ 反向对照：撒娇材料里没有「嘴贫」「较劲」（同是 playful，气质要分清）",
+          "嘴贫" not in relax and "较劲" not in relax, relax)
+    check("★ 反向对照：嘴贫材料里没有「撒娇」（两路不许揉成一档）",
+          "撒娇" not in banter, banter)
+    check("★ 正经公事那一档点出「正经」，且不沾撒娇 / 嘴贫",
+          "正经" in serious and "撒娇" not in serious and "嘴贫" not in serious, serious)
+    check("★ 试探那一路点出「试探撩拨」", "撩拨" in probe, probe)
+    tease = _tone_features(["你猜呀，不告诉你~ 😏"])
+    check("★ 卖关子那一句：同判撒娇轻盈，另点出「爱卖关子」",
+          "撒娇轻盈" in tease and "爱卖关子" in tease, tease)
 
     # ---------- ② 这一场的账本：按场分格、只留最近几句 ----------
 
@@ -168,6 +217,8 @@ def main() -> int:
               f'{NO_EXAMPLES}"""{SEP}{SEP}只给 1 段' in off_prompt, "")
         check("★ off 那趟一个字都没记（账本还是空的：不抽、不留痕）",
               not service._peer_lines.get("S9|甲"), str(service._peer_lines.get("S9|甲")))
+        check("★ off 那趟也没有本批新加的两条硬约束（量级 / 气质）",
+              "字数量级" not in off_prompt and "细分调性" not in off_prompt, "")
 
         # ---------- ④ auto：对方当下的口吻真的进了提示词 ----------
 
@@ -190,6 +241,27 @@ def main() -> int:
         check("★ 解析仍归 why（「不要混进正文」那条一个字没动）",
               '不要混进正文' in relax_prompt, "")
 
+        # 本批补的两维：硬约束 + 对方量级，得真的落在**风格那一段**里（不是散在别处）
+        hint_region = relax_prompt.split("对方口吻特征")[-1].split("只给 1 段")[0]
+        check("★ 硬约束①（字数量级必须贴近对方）在提示词里",
+              "字数量级" in hint_region and "同一个量级" in hint_region,
+              hint_region[:70].replace("\n", " / "))
+        check("★ 硬约束②（气质贴住细分调性）在提示词里",
+              "细分调性" in hint_region, "")
+        stated = re.search(r"约(\d+)–(\d+)字", hint_region)
+        check("★ 提示词里的对方量级 == 素材实测那一段（模型据此才知道该写多短）",
+              stated is not None
+              and (int(stated.group(1)), int(stated.group(2))) == (relax_lo, relax_hi),
+              stated.group(0) if stated else "没找到")
+        # "字数量级贴近"的机制化说法：照提示词给出的量级写一条回话，落在对方均值的
+        # 1.6 倍内。**有牙**——摘要一旦把对方量级报大（比如把两行并成一行去量），
+        # 上界跟着变大，这条立刻红。（模型本身被 stub 了，它到底写多长只能在真机看；
+        # 这里钉的是"提示词给没给足据此写短的准数"。）
+        check("★ 照这个量级写的回话落在对方均值 1.6 倍内",
+              stated is not None and int(stated.group(2)) <= 1.6 * relax_avg,
+              f"上界 {stated.group(2) if stated else '?'} 字 vs 1.6×{relax_avg:.1f}"
+              f"={1.6 * relax_avg:.1f}")
+
         stub.prompts.clear()
         service._peer_name = "乙"                      # 换一场（另一个人）
         service._write(AUTO_TRIGGER_TEXT, "\n".join(SERIOUS_LINES))
@@ -199,6 +271,13 @@ def main() -> int:
               serious_prompt.split("对方口吻特征")[-1][:60].replace("\n", " / "))
         check("★ 上一场（甲）的账没被这一场带跑",
               "撒娇" in service._peer_tone_summary("S9|甲"), "")
+        # 只看**摘要那一截**（「。回话仍用」之前）——后面的硬约束里本来就写着"极短句"
+        # 这个档位名（那是给模型看的），拿整段去判会误伤
+        serious_summary = serious_prompt.split("对方口吻特征")[-1].split("。回话仍用")[0]
+        check("★ 换了正经长句那一场 → 量级那格跟着变成长句跨度（不是极短）",
+              "长句" in serious_summary and "极短句" not in serious_summary
+              and f"约{serious_lo}–{serious_hi}字" in serious_summary,
+              serious_summary)
 
         stub.prompts.clear()
         service._peer_name = "丙"
@@ -266,7 +345,7 @@ def main() -> int:
         drain_threads()
         box.cleanup()
 
-    return summary("社交起草语气自适应（v2-social-tone-adaptive）")
+    return summary("社交起草语气自适应（v2-social-tone-adaptive + tone-length-align）")
 
 
 if __name__ == "__main__":
