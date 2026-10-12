@@ -50,6 +50,28 @@ MAX_FRAGMENTS = 3
 FLUSH_TIMEOUT_S = 5.0
 
 
+def ask_local_first(config: Config, prompt: str) -> tuple[dict[str, Any], bool]:
+    """这一趟问谁：本机有量化模型就在本地算，没有就照旧走 API。回 (数据, 是不是本地算的)。
+
+    A++ 本地优先。**只换「调谁」**——两边回的 JSON 走的都是同一段解析，后面写库那条链
+    一个字都不动。本机跑砸了（权重换了一半、内存不够、吐出来不是 JSON）不往上抛：在这儿
+    当成「本机这趟不行」，回落 API。宁可多花一趟钱，也不能把这批对话丢了。回落是**预期内**
+    的常态，不是故障——Gitee 用户拉下来就是这样。
+
+    抽成模块级函数是 v2-social-card-autodistill 做的：对象视角提炼（`peer_distill.py`）
+    走的是**同一条**本地优先的口径，没有第二份实现。`MindDistiller._ask` 现在只是它的一层
+    薄壳（把「是不是本地算的」记进 `_last_used_local`），行为与从前逐字相同。
+    """
+    if config.mind.local_model:
+        try:
+            data = local_llm.infer(config.local_models_dir, prompt)
+        except local_llm.LocalUnavailable as exc:
+            logger.info("情感记忆：本机这次没用上（%s），回落 API 提炼", exc)
+        else:
+            return data, True
+    return LLMFactory.create(config).chat_json(prompt), False
+
+
 class MindDistiller(QObject):
     """攒对话 → 判定聊完 → 提炼 → 进加密库。"""
 
@@ -196,23 +218,13 @@ class MindDistiller(QObject):
     def _ask(self, prompt: str) -> dict[str, Any]:
         """这一趟问谁：本机有量化模型就在本地算，没有就照旧走 API。
 
-        A++ 本地优先。**只换"调谁"**——两边回的 JSON 走的是同一段解析，
-        后面写库那条链（profile / ep_summary / fragment）一个字都不动。
-
-        本地跑砸了（权重换了一半、内存不够、吐出来不是 JSON）不往上抛：在这儿
-        当成"本机这趟不行"，回落 API。宁可多花一趟钱，也不能把这批对话丢了。
-        回落是**预期内**的常态，不是故障——Gitee 用户拉下来就是这样。
+        口径与实现全在 `ask_local_first`（v2-social-card-autodistill 把它抽了出去，对象
+        视角提炼走的是同一个函数）；这里只多做一件事——把「这趟是不是本地算的」记进
+        `_last_used_local`（设置页提示与测试断言读它）。
         """
-        if self._config.mind.local_model:
-            try:
-                data = local_llm.infer(self._config.local_models_dir, prompt)
-            except local_llm.LocalUnavailable as exc:
-                logger.info("情感记忆：本机这次没用上（%s），回落 API 提炼", exc)
-            else:
-                self._last_used_local = True
-                return data
-        self._last_used_local = False
-        return LLMFactory.create(self._config).chat_json(prompt)
+        data, used_local = ask_local_first(self._config, prompt)
+        self._last_used_local = used_local
+        return data
 
     def _run(self, batch: list[str]) -> dict[str, Any]:
         """后台线程里跑：问模型 → 落库。"""

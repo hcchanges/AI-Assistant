@@ -99,6 +99,10 @@ class MemoryReset:
         mind_store: Any = None,
         mind_index: Any = None,
         distiller: Any = None,
+        # 对象视角提炼那个缓冲区（v2-social-card-autodistill）：它攒的是**对方**的话，
+        # 跟上面那位攒的不是一批，所以要各收各的——清完记忆之后那几句要是不丢，过几分钟
+        # 又会把这人写回库里。可选（默认没有），理由跟这一排别的注入一样。
+        peer_distiller: Any = None,
         bus: Any = None,
     ):
         self._utterance_dao = utterance_dao
@@ -107,6 +111,7 @@ class MemoryReset:
         self._mind_store = mind_store
         self._mind_index = mind_index
         self._distiller = distiller
+        self._peer_distiller = peer_distiller
         self._bus = bus
 
     # ---------- 只读 ----------
@@ -155,6 +160,10 @@ class MemoryReset:
         # 都跟着没了（那反倒不是用户按按钮时想要的结果）
         if self._distiller is not None:
             self._distiller.discard_pending()
+        if self._peer_distiller is not None:
+            # 对象视角提炼那一格同样丢（见构造函数里那段说明）。**摆在同一个位置**：
+            # 前面几步中间抛错的话，攒着的对话还在，不至于连「刚才那几句」都跟着没了。
+            self._peer_distiller.discard_pending()
 
         logger.info("记忆与好感度已清空：%s", before.plain())
         if self._bus is not None:

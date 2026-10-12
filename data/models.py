@@ -186,6 +186,19 @@ class Card(Base):
     dislikes: Mapped[str | None] = mapped_column(Text, default=None)
     strategy: Mapped[str | None] = mapped_column(Text, default=None)
     relation_stage: Mapped[str | None] = mapped_column(Text, default=None)
+    # ---------- 对象档案·后台补全那四格（v2-social-card-autodistill） ----------
+    # 上一组四格是**手动填**的（建卡框里那四行）；这四格是**后台静默补**的——用户早
+    # 就把对象攻略卡开好了，聊着聊着宠物把"对面这个人是谁"一点点抽出来填进这儿。
+    # 所以它们**不进建卡框**（`ui/card_dialogs.py::PROFILE_FIELDS` 一个字没动）：
+    # 手动那条路照旧只有四行，这四格只由 `life/mind/peer_distill.py` 写。
+    #
+    # 同样**四列都可以为空**，且理由与上面那四列一致：只有对象攻略卡会填，其余八类卡
+    # 建出来就是 NULL，老库那批卡也都是 NULL——`data/db.py::_add_missing_columns` 只给
+    # 老表补可空列，所以这还是"加列即兼容"，不需要另写迁移。
+    age: Mapped[str | None] = mapped_column(Text, default=None)            # 年龄推断
+    emotion_state: Mapped[str | None] = mapped_column(Text, default=None)  # 情感状态
+    anxiety: Mapped[str | None] = mapped_column(Text, default=None)        # 焦虑 / 烦心的原因
+    interests: Mapped[str | None] = mapped_column(Text, default=None)      # 兴趣爱好
     # 专属知识库目录（v2-card-kb）：这张卡对应的卡级 RAG 落点，默认 知识库/cards/<id>。
     # 空 = 老卡还没建（按默认约定路径现算）；建卡时由 CardService 顺手建目录并填上。
     kb_path: Mapped[str | None] = mapped_column(String(512), default=None)

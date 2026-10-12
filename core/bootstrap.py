@@ -66,6 +66,7 @@ from life.greeting import GreetingService
 from life.intent import IntentJudge
 from life.mind import emotion_log
 from life.mind.distill import MindDistiller
+from life.mind.peer_distill import PeerDistiller
 from life.mind.index import MindVectorIndex
 from life.mind.intimacy import EXP_CHAT, EXP_INTERACTION, EXP_STRONG_EVENT, MindIntimacy
 from life.mind.kb import KnowledgeBase
@@ -536,6 +537,10 @@ class DesktopPetApp:
         # 一次继承，不另起一套。库打不开时这三件一并省掉，不假装记得。
         self.mind_recall: MindRecall | None = None
         self.mind_distiller: MindDistiller | None = None
+        # 对象视角提炼（v2-social-card-autodistill）：跟上面那件是**镜像**——上面那件看
+        # 「主人自己说了什么」，这件看「聊天对象说了什么」。落点上那件写「主人那一档」、
+        # 这件写「这个人那一格」；它只往记忆库写，卡面那几格由下面注入的 `write_card` 收口。
+        self.peer_distiller: PeerDistiller | None = None
         self.mind_proactive: MindProactiveService | None = None
         # B 养成两件（好感度 / 记忆簿）：纯本地规则，不调模型、不联网。
         # 好感度决定语气多亲、多久主动找你一次；记忆簿挂在提炼回调上落库。
@@ -556,6 +561,17 @@ class DesktopPetApp:
                 config=config,
                 store=self.mind_store,
                 on_distilled=self._on_mind_distilled,
+            )
+            # 对象视角提炼（v2-social-card-autodistill）：聊完一轮，把「对方是谁」补进
+            # 对象攻略卡与三记忆库的 peer 格。两只手都在这一层注入——「这张卡在不在」用
+            # 现成的 `_guide_card_exists`（它不吃参数，包一层对成「按对象名问」）、
+            # 「把结论写上去」走 `_write_guide_card_fields`。提炼器**不 import 任何卡
+            # 模块**，跟社交那条线不碰库是同一条口径：谁的东西谁自己拿手。
+            self.peer_distiller = PeerDistiller(
+                config=config,
+                store=self.mind_store,
+                card_exists=lambda peer: self._guide_card_exists(),
+                write_card=self._write_guide_card_fields,
             )
             self.mind_proactive = MindProactiveService(
                 config=config,
@@ -589,6 +605,9 @@ class DesktopPetApp:
             mind_store=self.mind_store,
             mind_index=self.mind_index,
             distiller=self.mind_distiller,
+            # 清记忆时把对象视角提炼攒的那几格也丢了：不然清完过几分钟，那人又被
+            # 后台抽一遍写回库里（见 `core/reset.py` 里那一格自己的说明）。
+            peer_distiller=self.peer_distiller,
             bus=self.bus,
         )
 
@@ -995,6 +1014,11 @@ class DesktopPetApp:
             self.bus.utterance_analyzed.connect(
                 lambda text, *_rest: self.mind_distiller.note_turn(text)
             )
+        # 对象视角提炼（v2-social-card-autodistill）：社交那条线在单聊页上认到「对方说了
+        # 句新的」就在这条信号上广播——（分格键 `sid|peer`、对象名、对方那半边的话），
+        # 落到他那格攒着，聊完一轮再抽。跟上面那条 `utterance_analyzed` 并列、各管各的。
+        if self.peer_distiller is not None:
+            self.bus.peer_utterance.connect(self.peer_distiller.note_turn)
         # 好感度（B 养成）：用户每说一句就记一点经验。接在这儿而不是 chatter 里，
         # 跟提炼器一个道理——"用户说了句话"本来就在这条信号上广播。
         # 经验是纯本地的，不涉及联网，所以主线程直接写没问题
@@ -1096,6 +1120,8 @@ class DesktopPetApp:
             self.screen_notes.start()
         if self.mind_distiller is not None:
             self.mind_distiller.start()
+        if self.peer_distiller is not None:
+            self.peer_distiller.start()
         if self.mind_proactive is not None:
             self.mind_proactive.start()
         QTimer.singleShot(FIRST_RUN_HINT_DELAY_MS, self._first_run_hint)
@@ -1123,6 +1149,12 @@ class DesktopPetApp:
         if self.mind_distiller is not None:
             self.mind_distiller.stop()
             self.mind_distiller.flush()
+        # 对象视角提炼（v2-social-card-autodistill）：同一个次序——先停表、再抢抽，
+        # 然后才轮到下面关库。它抢抽时**只往记忆库写**（卡面那几格得回主线程，退出这一趟
+        # 不补）；抢不到就是少记一格，库里已有的东西一条不动。
+        if self.peer_distiller is not None:
+            self.peer_distiller.stop()
+            self.peer_distiller.flush()
         if self.mind_proactive is not None:
             self.mind_proactive.stop()
         if self.mind_store is not None:
@@ -2422,6 +2454,38 @@ class DesktopPetApp:
         return self.card_service.find_card(
             CARD_CATEGORY, GUIDE_CARD_TITLE
         ) is not None
+
+    def _write_guide_card_fields(self, peer: str, fields: dict) -> None:
+        """把对象视角提炼抽出来的那几格补进「对象攻略卡」（v2-social-card-autodistill）。
+
+        接的是 `PeerDistiller` 的 `write_card`——它抽完**只管记忆库**，卡面这几格回到主
+        线程由这一手落。落点是 `CardService.set_profile`，跟建卡那四格写的是同一批格子
+        （`data/dao.py::_PROFILE_COLUMNS` 那八格）。三条口径：
+
+        - **卡不在就什么都不做**：用户没开这张卡，抽出来的东西只进记忆库（他哪天开了
+          卡，下一次提炼自然把卡补上）。这儿再判一次，是因为「判卡在不在」与「真写下去」
+          之间隔着一段后台时间，那张卡有可能刚好被收进卡册。
+        - **只补这次抽到的格**：`set_profile` 自己就是「给几格写几格」，别的格留着。
+        - **补发一声 `card_changed`**：`set_profile` 的 docstring 明写它不发事件（那几格
+          原本只在建卡弹框里填，没人在卡开着的时候改），而这一批是**随时可能**补上来
+          的，不发一声卡面 / 轮播不会跟着重排。
+
+        `peer` 这一格收进来是为了跟提炼器那边的接口对齐；**写卡不看它是谁**——「对象攻
+        略卡」本来就只有一张（`find_card` 按大类 + 卡名查重），卡上记的就是「眼下这一个
+        对象」。
+        """
+        if self.card_service is None or not fields:
+            return
+        card = self.card_service.find_card(CARD_CATEGORY, GUIDE_CARD_TITLE)
+        if card is None:
+            logger.debug(
+                "对象攻略卡：这轮抽到 %d 格，但卡不在（被收进卡册了？），只进记忆库",
+                len(fields),
+            )
+            return
+        self.card_service.set_profile(card.id, **fields)
+        self.bus.card_changed.emit()
+        logger.info("对象攻略卡：补上 %d 格（%s）", len(fields), "、".join(sorted(fields)))
 
     def _peer_profile_for(self, peer: str) -> str:
         """关于**对面这个人**，我们这边记着什么（v2-social-card-inject）。

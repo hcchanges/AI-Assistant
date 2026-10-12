@@ -32,16 +32,24 @@ from data.models import (
     User,
 )
 
-# 对象攻略卡那四个结构化格子（v2-social-card-base）。放这儿是因为读写两头都要认它：
+# 对象攻略卡那几个结构化格子。放这儿是因为读写两头都要认它：
 # 建卡时（`CardDAO.add`）与后补时（`CardDAO.set_profile`）。
-_PROFILE_COLUMNS = ("likes", "dislikes", "strategy", "relation_stage")
+#
+# 前四个是**手动填**的（v2-social-card-base，建卡框里那四行）；后四个是**后台静默补**
+# 的（v2-social-card-autodistill，`life/mind/peer_distill.py` 抽出来直接调
+# `CardDAO.set_profile` 写）。四个新的**不进建卡框**，但**必须在这张表里**——`set_profile`
+# 就是按它过滤字段的，漏在这儿等于那四格写不进库（静默丢，一句日志都没有）。
+_PROFILE_COLUMNS = (
+    "likes", "dislikes", "strategy", "relation_stage",
+    "age", "emotion_state", "anxiety", "interests",
+)
 
 
 def _profile_columns(profile: dict[str, str] | None) -> dict[str, str]:
-    """把"对象档案"那本字典收成能直接丢给 `Card(...)` 的四个关键字。
+    """把"对象档案"那本字典收成能直接丢给 `Card(...)` 的那几个关键字。
 
     认不出的键直接丢掉、空值不写（跟 `set_profile` 同一个口径）：批量传一本大字典
-    进来不该把不相干的列一起写脏。`None` / 不是字典 → 一个关键字都不给，四列留 NULL。
+    进来不该把不相干的列一起写脏。`None` / 不是字典 → 一个关键字都不给，那几列留 NULL。
     """
     if not isinstance(profile, dict):
         return {}
@@ -498,7 +506,8 @@ class CardDAO:
                 plaza_pos=int(top) + 1,
                 created_at=now,
                 updated_at=now,
-                # 对象档案那四格（v2-social-card-base）：不传就是 NULL，九类卡一视同仁
+                # 对象档案那几格（v2-social-card-base / -autodistill）：不传就是 NULL，
+                # 九类卡一视同仁
                 **_profile_columns(profile),
             )
             session.add(card)
@@ -555,7 +564,8 @@ class CardDAO:
             session.commit()
 
     def set_profile(self, card_id: int, **fields: str) -> None:
-        """写这张卡的对象档案那四格（v2-social-card-base）：喜好 / 禁忌 / 攻略策略 / 关系阶段。
+        """写这张卡的对象档案那几格（v2-social-card-base 的四格 + v2-social-card-autodistill
+        的四格）：喜好 / 禁忌 / 攻略策略 / 关系阶段 / 年龄 / 情感状态 / 焦虑原因 / 兴趣爱好。
 
         只更新这次给到的（`None` / 空串跳过），其余留着——跟 `MindStore.save_profile`
         一个口径：聊到一点补一点，别把上一轮填的抹掉。卡不存在就什么都不做。

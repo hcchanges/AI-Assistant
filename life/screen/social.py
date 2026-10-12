@@ -1357,6 +1357,13 @@ class SocialReplyService(QObject):
         self._peer_name = ""
         # **只存内存**：本场从聊天窗认出来的字（对方最近那条在里面）。生成时用掉即清，
         # 不落盘、不进任何库（v2-social-fewshot 的范围钉在这几行）。
+        #
+        # **一处例外，如实记在明面上**（v2-social-card-autodistill）：同一份材料（对方那
+        # 半边、按条取尾）在 `_note_peer_turns` 那一处**另外递给了对象视角提炼器**一份。
+        # 递的是原话，落库的是提炼器抽出来的结论（「这个人是谁」），原话照样一个字都不落；
+        # 而且那条路有三道闸（开关 / 认不出对象名不递 / 空材料不递）＋ 收那一头的
+        # `card_exists`，用户没开对象攻略卡就整条不动。`_chat_text` 这一格本身的口径
+        # 一个字没变：**它自己**还是用完即清、不落盘。
         self._chat_text = ""
         # 那屏字是什么时候认回来的（v2-social-stale-guard）：起草时抓不成会拿它比一下
         # 新鲜度，过期的当没有。取走即归零（见 `_take_chat_text`）。
@@ -2093,7 +2100,15 @@ class SocialReplyService(QObject):
         # ——用户明着开口那一趟不是"触发 offer"，跟批次8"空材料那条只加在自动路上"
         # 同一个先例。摆在材料那几行**后头**：那一问真要冒，也等这一屏的字先记完；
         # 而且真有草稿在拟（`_drain_pending` 刚把 `_running` 立起来）时它自己就不冒了。
-        self.note_page_kind(chat_page_kind(read))
+        page_kind = chat_page_kind(read)
+        # 这一屏是单聊时，顺手把「对方的话」递给对象视角提炼（v2-social-card-autodistill）。
+        # **判页型只算一次**：下面 `note_page_kind` 原来收的就是 `chat_page_kind(read)`
+        # 的返回值，这一改只是把那个返回值先接在手上、两个消费者共用，口径一字未变。
+        # 非单聊（群聊 / 列表页 / 搜索页 / 订阅号…）那一屏一个字都不递——群里那句可能是
+        # 张三说的，抽出来的会是「这一群人的画像」。
+        if is_personal_kind(page_kind):
+            self._note_peer_turns(self._chat_text)
+        self.note_page_kind(page_kind)
 
     def _on_screen_read_failed(self, exc: Exception) -> None:
         """认不出来：这一场就没有对方原话，如实当"没认到"，**绝不编一句**。"""
@@ -2666,6 +2681,12 @@ class SocialReplyService(QObject):
         if not is_personal_kind(kind):
             logger.debug("这一屏不是单聊（%s），不认作对方的消息、不起草", kind)
             return
+        # 这一屏是单聊 → 把对方的话递给对象视角提炼（v2-social-card-autodistill）。
+        # **递的是 `_tail_context(read)`**（对方那半边、按条取尾），不是下面那个 `new_tail`
+        # （`visible`，两边都算，里头混着用户自己刚发的那句）——跟起草喂模型的是同一份材料，
+        # 两条路一个口径。**摆在「是单聊」那道闸之后、归属判定之前**：对象视角提炼关心的
+        # 是「对方说过什么」，不关心这一拍算不算「他回了新消息」（那是起草那条线的事）。
+        self._note_peer_turns(_tail_context(read))
         # 存的是 `visible`（两边都算）——下一拍要拿它比"画面变没变"，只存对方那半边
         # 会让"我自己刚发了一句"这档在下一拍被当成"没变"。
         new_tail = self._normalize_listen(read.visible)
@@ -3094,6 +3115,47 @@ class SocialReplyService(QObject):
         会话就是另一本账，**不串场**。
         """
         return _tone_features(self._peer_lines.get(peer, [])[-TONE_WINDOW_LINES:])
+
+    # ---------- 对象视角提炼（v2-social-card-autodistill） ----------
+
+    def _card_autodistill_on(self) -> bool:
+        """对象视角提炼开没开：`card_autodistill=off` 时整条不跑。
+
+        只认 `off`，写别的（含留空 / `auto`）都按开算——跟 `card_memory` / `tone_align`
+        同一个口径。**取不到那一格就当开**（老配置 / 测试桩上没有这一项）：默认值是
+        `auto`，"读不到"不该变成"关掉"。
+        """
+        value = getattr(self._config.screen, "card_autodistill", "auto")
+        return (value if value is not None else "auto") != "off"
+
+    def _note_peer_turns(self, chat_text: str) -> None:
+        """把这一拍认到的**对方的话**递给对象视角提炼那条线（v2-social-card-autodistill）。
+
+        递出去的是**对方那半边、按条取尾**的那一份材料（`_tail_context(read)` 的输出，
+        跟起草喂模型的**是同一份**）——宠物自己说的话、屏幕上别处的字都不进。递的是原话，
+        但只走内存：提炼器攒够一轮才把它喂给模型、抽成「这个人是谁」，**落库的是抽出来的
+        结论，原话一个字都不落**（见 `life/mind/peer_distill.py` 的模块注释）。
+
+        三道闸，缺一条就不递：
+        ① 开关关着（`card_autodistill=off`）；
+        ② **认不出对象名**——没有名字就没有那一格，既无从分格、也无从知道该补哪张卡；
+        ③ 材料是空的。
+
+        `sid|peer` 那把键跟冒话冷却 / 帮聊窗口同一把（见 `_cooldown_key`）：换个会话窗
+        就是另一格，**不串场**。收的那一头还会再挑一次（`card_exists` 那一关）。
+        """
+        if self._bus is None or not self._card_autodistill_on():
+            return
+        text = (chat_text or "").strip()
+        if not text:
+            return
+        peer = (self._peer_name or "").strip()
+        if not peer:
+            return
+        key = self._cooldown_key()
+        if not key:
+            return
+        self._bus.peer_utterance.emit(key, peer, text)
 
     # ---------- 起草 ----------
 

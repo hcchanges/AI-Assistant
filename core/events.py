@@ -53,6 +53,14 @@ class EventBus(QObject):
     # 卡牌服务据此判定该不该提议建卡。may_invite=False 表示这一场主动服务已经动过手了（指令 26-B），
     # 这次只记观察、不冒第二句要用户答的话
     utterance_analyzed = Signal(str, str, str, float, str, bool)
+    # **对方（聊天对象）刚说了句什么**（这一场的分格键 `sid|peer`、对象名、对方那句话的
+    # 尾巴）：语义上跟上面那条是镜像——那条是「主人说了什么」，这条是「**对方**说了什么」。
+    # 帮聊那条线（`SocialReplyService`）每认到一屏对方的话就发一声，对象视角提炼器
+    # （`life/mind/peer_distill.py`）据此攒着，聊完一轮再统一抽成「这个人是谁」。
+    # 跟 `utterance_analyzed` 一样，**发的是原文**，收的那一头自己决定落什么——提炼器只把
+    # 抽出来的结论落库，原话一个字都不写（见那边的模块注释）。
+    peer_utterance = Signal(str, str, str)
+
     # 卡牌服务提议建一张卡（品类、建议卡名）：会话层切到"等用户点头"
     card_proposed = Signal(str, str)
     # 用户在对话流里点了「不用了」（品类）：卡牌服务记下这次拒绝，限频期间不再提

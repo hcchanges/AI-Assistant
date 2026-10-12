@@ -102,6 +102,7 @@ OFFLINE = (
     "test_social_exit_easy.py",
     "test_social_leftedge_fix.py",
     "test_social_search_state.py",
+    "test_social_card_autodistill.py",
     "test_multimodal.py",
     "test_mood_fix.py",
     "test_mood_horror.py",

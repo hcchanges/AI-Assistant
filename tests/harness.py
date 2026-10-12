@@ -262,6 +262,14 @@ class Sandbox:
         raw["voice"]["asr_enabled"] = False
         raw["voice"]["asr_local_model_dir"] = str(self.dir / "models")
         raw["voice"]["asr_hotkey"] = ""
+        # 对象视角提炼的总闸（v2-social-card-autodistill）：跟下面 notes.enabled 是同一条
+        # 道理——本文件拿用户真实 config.yaml 当底稿，用户哪天在设置里把它关成 off，凡是
+        # 走社交那条线的测试就都不再走提炼那一段（或者反过来：他开着、测试以为关着），
+        # 红的会是本机偏好而不是代码。这里钉成**代码默认值**（`ScreenSection.card_autodistill`
+        # 的初值 auto），要测 off 那条路的模块自己往 `app.config.screen` 上改——改的是
+        # 内存对象，不碰文件（`test_social_card_inject.py` 里改 `card_memory` 就是这么做的）。
+        raw.setdefault("screen", {})
+        raw["screen"]["card_autodistill"] = "auto"
         # 抓屏笔记（C 多模态）：落点必须进临时沙箱——不然测试会往用户真实的
         # data/notes/ 里写东西（红线）。默认关着（NotesSection 默认），要测的模块自己开。
         #
@@ -446,6 +454,8 @@ class StubLLM:
         self.followup: dict[str, str] = {"intent": "unclear", "time_iso": ""}
         self.memories: list[dict[str, Any]] = []
         self.mind_result: dict[str, Any] = {}            # 情感记忆提炼回什么 JSON
+        # 对象视角提炼（v2-social-card-autodistill）：对方档案回什么 JSON
+        self.peer_result: dict[str, Any] = {}
         self.notes_result: dict[str, Any] = {}           # 抓屏笔记提炼回什么 JSON
         self.tools_result: dict[str, Any] = {}           # 卡内工具生成（v2-card-tools-B）回什么 JSON
         self.candidates_result: dict[str, Any] = {}      # 社交候选回复（v2-social-reply-ext）回什么 JSON
@@ -464,6 +474,12 @@ class StubLLM:
 
     def route_json(self, prompt: str) -> dict[str, Any]:
         self.prompts.append(prompt)
+        # 对象视角提炼（v2-social-card-autodistill）：判据是那段提示词里**独有**的字面
+        # `"anxiety"`（对方档案那几格之一）。**摆在最前面**：它跟下面每一条分流标记都不
+        # 撞（不带 `"profile"` / `"rel_state"` / `"intent"` / `"key_points"`…），摆头一条
+        # 谁也别想误伤它——这张表条数越来越多，新标记挤进来时最先命中的那个说了算。
+        if '"anxiety"' in prompt:
+            return dict(self.peer_result)
         if "time_confidence" in prompt:          # 吐嘈解析
             return dict(self.parse_result)
         if '"rel_state"' in prompt:              # 情感记忆提炼（S3）
