@@ -211,6 +211,22 @@ OFFER_HANG_S = 90.0
 # `_session_id` 被同一个窗口截出各种长度、或被某些异常路径灌进无穷多不同的键，把一本
 # 用不着多大的字典撑成内存泄漏。超了就把**最旧**的那些格丢掉。
 _ASKED_MAX_WINDOWS = 64
+# 「刚切回社交前台」这一阵里，对象名还没重新认出来之前，**先沿用离开前那个名字**把冷却 /
+# 帮聊那两本账兜住（v2-social-switch-reask-fix）。
+#
+# 真机 2026-10-12 23:36:24 切去 msedge、23:37:03 切回微信：切回那一拍抓屏先按"带子变了"
+# 把这一场的名字清掉（`_peer_band_changed`），后台认字到 23:37:05 才回话——回的是「0 字
+# （没认出来）」。中间这几拍 `_cooldown_key()` 就退回裸会话标识，冷却 / 帮聊两本账当场换了
+# 一把键：23:37:05,658 又冒了一句「社交软件在前台（Weixin.exe），冒一句要不要帮忙措辞」
+# （本来人在帮聊窗口里），用户看到的就是"从浏览器切回来又问我一遍要不要帮"。
+#
+# 所以切回来的这一阵先兜住那个名字，**认出来就换成新的**（换人是换人，只是别在"还没认出来"
+# 的这几拍里把账本换掉）。这一格**只喂 `_cooldown_key()`**——材料 / 提示词 / 提炼那些地方
+# 照旧只认"这一拍真读到的名字"，宁可少喂一格，也不把上一个人的档案端给下一个人。
+#
+# 上界：兜到"认出来"为止，最长不超过这个秒数（防的是认字那条腿一直失败、把上一个人的名字
+# 无限期挂在这一场上）。
+PEER_HOLD_MAX_S = 600.0
 # 点过 [好呀] 之后、那一问还挂着等对方那句时，自己看前台的间隔（毫秒，v2-social-on-demand-snap）。
 #
 # 真机 2026-10-08 20:09:47–20:10:28 那一段：用户点 [好呀] 那一刻前台是宠物自己
@@ -1355,6 +1371,14 @@ class SocialReplyService(QObject):
         # 上一拍认到的"这一场对着的是谁"（v2-social-cooldown-by-peer）：只喂 `_cooldown_key()`，
         # 不进材料、不进日志（日志那边只记 `len()`）。取不到留空串 = 退回裸会话标识。
         self._peer_name = ""
+        # **「这一场是谁」那把键用的名字**（v2-social-switch-reask-fix）：平时跟上面那一格
+        # 一致，只在"刚切回社交前台、名字还没重新认出来"的那几拍分岔——键沿用上一次认到的，
+        # 别在半路把冷却 / 帮聊两本账换掉。**只喂 `_cooldown_key()`**：不进材料、不进提示词、
+        # 不喂提炼器（`_peer_profile_block` / `_note_peer_turns` 那些地方照旧只认
+        # `_peer_name`，读不到就当认不出）。
+        self._peer_key_name = ""
+        # 这一格兜到什么时候（`time.monotonic()` 口径；`0.0` = 没在兜）。见 `PEER_HOLD_MAX_S`。
+        self._peer_hold_until = 0.0
         # **只存内存**：本场从聊天窗认出来的字（对方最近那条在里面）。生成时用掉即清，
         # 不落盘、不进任何库（v2-social-fewshot 的范围钉在这几行）。
         #
@@ -1573,6 +1597,15 @@ class SocialReplyService(QObject):
         对方 / 群名）。真机佐证：10:37:41 标识一从 2 字变 6 字，10:37:50 那一句**当场就
         冒出来了**——机制本身没坏，坏的是"所有会话共用一格"。
 
+        **平时取的就是 `_peer_name`**（老口径）；只在"**刚切回社交前台、名字还没重新认
+        出来**"的那一阵，才退回吃 `_peer_key_name` 兜住的那一格（v2-social-switch-reask-
+        fix）。理由：切前台回来那几拍常常读不到名字（带子刚被判成"换了场"、认字那条腿还
+        没回话），按空的 `_peer_name` 取就会在半路把这一场的键退回裸标识——冷却 / 帮聊两本
+        账跟着换一把键，真机上就是从浏览器切回微信又问你一遍"要不要帮你回"。
+        `_peer_key_name` 是"这一场最后一次认到的名字"，只在**刚切回来那一阵、且
+        `_peer_name` 为空**时才顶上（见 `PEER_HOLD_MAX_S`）；`_peer_name` 一有值它就作废，
+        不会拿旧名字盖新名字。
+
         **认不出对象名就逐字退回裸 `_session_id`**（老行为，也是一个字符都不多出来的
         降级）：测试桩没接 `peer_provider`、主窗、列表页、账号选择页全走这一支。
 
@@ -1585,7 +1618,10 @@ class SocialReplyService(QObject):
         **仍然只是长度**。
         """
         sid = self._session_id or ""
-        peer = self._peer_name or ""
+        # "刚切回来那一阵" = 布过防、且还没到期（见 `PEER_HOLD_MAX_S`）。平时这一格是 False，
+        # 取键照旧只看 `_peer_name`——既有用例里手工摆 `_peer_name` 的那些格子一个字不受影响。
+        held = bool(self._peer_hold_until) and self._clock() < self._peer_hold_until
+        peer = self._peer_name or (self._peer_key_name if held else "")
         if not peer or peer == sid:
             return sid
         return f"{sid}|{peer}"
@@ -1808,6 +1844,21 @@ class SocialReplyService(QObject):
         self._locked_pending = bool(fresh)           # 咽着新内容：冷却一过主动重看
         return "hold"
 
+    def _arm_peer_hold(self) -> None:
+        """刚切回社交前台那一拍：把「这一场是谁」那把键兜住（v2-social-switch-reask-fix）。
+
+        独立成一个方法，是因为 `on_foreground` 那一层有一条既有口径（v2-social-grab-
+        whitelist）：**那一层不碰钟**——`monotonic` / `time.` / `clock(` 一个都不能出现在
+        它的源码里。读钟这一句挪到这儿，调用点只留 `_arm_peer_hold()`，那条断言照旧
+        成立（既有的东西一个字不改，是本项目一直的口径）。
+
+        **只在"走出去了、又切回社交前台"那一拍布防**（调用点就是那道闸），走出聊天窗口那
+        一拍不布防——兜的是"切回来"，不是"在场"。失效的三条路：认出名字（`_sync_session`
+        读到就用新的、当场解防）、真换场（会话标识变了，那一支不看防）、防到期（见
+        `PEER_HOLD_MAX_S`）。
+        """
+        self._peer_hold_until = self._clock() + PEER_HOLD_MAX_S
+
     # ---------- 冒话 ----------
 
     def on_foreground(self, proc: str) -> None:
@@ -1856,6 +1907,16 @@ class SocialReplyService(QObject):
             # 这一屏是哪一种页那格也清回去（v2-social-trigger-window-gate）：下一趟进来
             # 重新算一次"非单聊 → 单聊"的跃迁，别端着上一趟的页型把第一拍挡掉。
             self._page_kind = ""
+        if not was_social and self._social_foreground:
+            # 刚切回社交前台（v2-social-switch-reask-fix）：这一趟抓屏会先把这一场的名字清掉、
+            # 等后台重新认（真机 2~15 秒，23:37:03 切回 → 23:37:05 回「0 字」→ 23:37:18 才认出
+            # 来），中间那几拍别把「这一场是谁」那把键换成裸会话标识——先沿用离开前那个名字
+            # 兜住（详见 `PEER_HOLD_MAX_S` 与 `_peer_key_name` 那两处说明）。
+            #
+            # 读钟那一句摆在 `_arm_peer_hold()` 里：这一层有一条既有口径
+            # （v2-social-grab-whitelist）——**不碰任何钟相关的东西**（连注释里都不能出现
+            # 那三个记号），所以"什么时候到期"那一步得挪到那个方法里去算。
+            self._arm_peer_hold()
         # 自动监听（v2-social-auto）：进/出社交前台，起/停那个轻量轮询计时器。
         self._sync_listen_timer()
         if not self.enabled or not self._social_foreground:
@@ -2376,6 +2437,15 @@ class SocialReplyService(QObject):
         self._peer_name = self._normalize_listen(
             self._peer_provider() if self._peer_provider is not None else ""
         )
+        peer = self._peer_name
+        # 「这一场是谁」那把键的名字（v2-social-switch-reask-fix）：读到名字就用新的；读不到
+        # 要看是不是"刚切回来那一阵"——是就沿用离开前那个（见 `PEER_HOLD_MAX_S`），不是就照
+        # 老口径清掉退回裸标识（在场里读不到名字 = 疑似换场，宁可清也不串名）。
+        if peer:
+            self._peer_key_name = peer
+            self._peer_hold_until = 0.0
+        elif not (self._peer_hold_until and self._clock() < self._peer_hold_until):
+            self._peer_key_name = ""
         previous = self._session_id
         self._session_id = ident
         if not previous or previous == ident:
@@ -2384,6 +2454,9 @@ class SocialReplyService(QObject):
             "社交窗换了会话（上一场标识 %d 字 → 这一场 %d 字），上一场的拟稿记忆一并清掉",
             len(previous), len(ident),
         )
+        # 真换场（会话标识变了）：兜住的那一格跟着作废——那是**上一场**的人，不能带过来。
+        self._peer_key_name = peer
+        self._peer_hold_until = 0.0
         self._forget_session_memory()
         return True
 
