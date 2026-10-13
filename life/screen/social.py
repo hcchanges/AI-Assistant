@@ -80,6 +80,7 @@ from brain.llm.factory import LLMFactory
 from brain.prompts.templates import (
     SOCIAL_DRAFT_PROMPT,
     SOCIAL_DRAFT_SYSTEM,
+    SOCIAL_EMOTION_STATE_BLOCK,
     SOCIAL_PEER_PROFILE_BLOCK,
     SOCIAL_PROFILE_PROMPT,
     SOCIAL_PROFILE_SYSTEM,
@@ -1205,6 +1206,20 @@ _TONE_BIZ = ("麻烦", "请问", "汇报", "方案", "确认", "安排", "会议
 _TONE_PROBE = ("真的假的", "不会吧", "你是不是", "你怎么", "为什么", "到底",
                "难道", "是不是", "骗我")
 
+# —— 进退分寸（v2-social-emotion-state）用的两张短表 ——
+#: 该退：对方明说想收 / 有事 / 累了——这些词一出现，这一轮就别再往前带。
+#: 只收**多字或配字**，不收单字（"忙/累/困"单用会误伤"帮忙""积累""困难"）。
+_RETREAT_WORDS = (
+    "好忙", "太忙", "忙死", "忙得", "最近忙", "先忙",
+    "好累", "太累", "累死", "累得", "有点累", "心累",
+    "好困", "太困", "困了", "犯困",
+    "先睡", "睡了", "要睡", "去睡", "睡觉", "晚安",
+    "改天", "再说", "下次吧", "回头说", "有空再说", "改天再聊",
+    "没空", "加班", "先这样", "晚点",
+)
+#: 冷短回收尾那一档：单句 ≤ 这个字数、没有反问也没有表情，连续两句就算"语气转冷"
+_SHORT_REPLY_MAX = 5
+
 
 def _is_face(ch: str) -> bool:
     """这一个字符算不算"表情"。判据是**码位**，不是词表——`_has_face` 与"按字取用"
@@ -1297,6 +1312,53 @@ def _tone_features(lines: list[str]) -> str:
     else:
         parts.append("调性日常")
     return "，".join(parts)
+
+
+def _emotion_state(lines, emotion=""):
+    """对方这几句的**进退分寸**：可攻 / 需守 / 该退；一句都判不了就回空串。
+
+    纯规则、照字面判（不碰盘 / 库 / 模型），跟 `_tone_features` 同一个纪律：复用后者那几张
+    现成词表（`_TONE_PROBE` 反问抛钩子 / `_TONE_TEASE` 卖关子 / `_TONE_CUTE` 撒娇轻盈 /
+    `_TONE_LAUGH` 笑声），另加一张 `_RETREAT_WORDS` 收退信号。`emotion` 是这一拍
+    `dialog_router.classify` 判出的对方这句的情绪。
+
+    **退信号优先于进信号**——宁可收一档，也别在对方已经想撤的时候还往前带。判据全在字面：
+    明说忙 / 累 / 想睡 / 改天、这一句的情绪被识别成负向（烦 / 怒 / 丧）、最近两句都是冷短
+    回收尾（≤ `_SHORT_REPLY_MAX` 字、没反问没表情）、或上一句还有表情这一句一下没了
+    （emoji 骤减）。可攻则是积极接梗 / 反问抛钩子 / 卖关子 / 撒娇轻盈 / 笑声表情 / 情绪轻松。
+    """
+    body = [line.strip() for line in lines if line and line.strip()]
+    if not body and not emotion:
+        return ""
+    joined = "".join(body)
+    last = body[-1] if body else ""
+    prev = body[-2] if len(body) >= 2 else ""
+    has_q = "？" in joined or "?" in joined
+
+    # —— 该退 ——
+    retreat_word = any(word in joined for word in _RETREAT_WORDS)
+    negative = emotion in dialog_router.NEGATIVE_EMOTIONS
+    last_short_cold = (
+        bool(last) and len(last) <= _SHORT_REPLY_MAX
+        and "？" not in last and "?" not in last and not _has_face(last)
+    )
+    prev_short = bool(prev) and len(prev) <= _SHORT_REPLY_MAX
+    emoji_drop = bool(prev) and _has_face(prev) and bool(last) and not _has_face(last)
+    if retreat_word or negative or (last_short_cold and prev_short) or emoji_drop:
+        return "该退"
+
+    # —— 可攻：积极接梗 / 反问抛钩子 / 主动延伸话题 / 情绪正向轻松 ——
+    probing = has_q and any(word in joined for word in _TONE_PROBE)
+    tease = any(word in joined for word in _TONE_TEASE)
+    cute = any(word in joined for word in _TONE_CUTE)
+    laugh = any(word in joined for word in _TONE_LAUGH if word not in ("~", "～"))
+    face = any(_is_face(ch) for ch in joined)
+    positive = emotion == dialog_router.EMOTION_HAPPY
+    if probing or tease or cute or laugh or face or positive:
+        return "可攻"
+
+    # —— 需守：中性应答 / 单句无明确进退 ——
+    return "需守"
 
 
 class SocialReplyService(QObject):
@@ -3189,6 +3251,17 @@ class SocialReplyService(QObject):
         """
         return _tone_features(self._peer_lines.get(peer, [])[-TONE_WINDOW_LINES:])
 
+    def _peer_emotion_state(self, peer: str) -> str:
+        """**这一场**对方最近几句的进退分寸：可攻 / 需守 / 该退；判不了就回空串。
+
+        读的是跟 `_peer_tone_summary` **同一本账**（`_peer_lines`，按 `sid|peer` 分格）里
+        最近 `TONE_WINDOW_LINES` 句，再加上这一拍 `_peer_route` 判出的**对方这句的情绪**
+        ——纯规则、零延迟、不碰盘 / 库 / 模型。退信号优先于进信号（见 `_emotion_state`）。
+        """
+        route = self._peer_route
+        emotion = str(getattr(route, "emotion", "") or "").strip() if route is not None else ""
+        return _emotion_state(self._peer_lines.get(peer, [])[-TONE_WINDOW_LINES:], emotion)
+
     # ---------- 对象视角提炼（v2-social-card-autodistill） ----------
 
     def _card_autodistill_on(self) -> bool:
@@ -3270,6 +3343,9 @@ class SocialReplyService(QObject):
             summary = self._peer_tone_summary(peer)
             if summary:
                 tone_hint = SOCIAL_TONE_HINT_BLOCK.format(peer_tone_hint=summary)
+            state = self._peer_emotion_state(peer)
+            if state:
+                tone_hint += SOCIAL_EMOTION_STATE_BLOCK.format(emotion_state=state)
         # 对方这个人（v2-social-card-inject）：`_peer_route` ＋ 装配层按对象名检索到的档案。
         # `card_memory=off` 时整趟不算也不问——提示词与加它之前**逐字相同**。
         peer_profile = self._peer_profile_block() if self._card_memory_on() else ""
