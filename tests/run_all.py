@@ -107,6 +107,7 @@ OFFLINE = (
     "test_social_switch_reask_fix.py",
     "test_social_emotion_state.py",
     "test_social_topic_roadmap.py",
+    "test_social_stage_guard.py",
     "test_multimodal.py",
     "test_mood_fix.py",
     "test_mood_horror.py",
