@@ -157,6 +157,45 @@ def guide_hint(context: dict) -> str:
     return ""
 
 
+# 对象攻略卡那八格「对方档案」的键 → 人话名字（v2-social-card-uiread）。键就是 `Card` 上的
+# 列名（跟 `data/dao.py::_PROFILE_COLUMNS` / `life/mind/peer_distill.py::CARD_FIELDS` 同一批）。
+# 顺序按"接话时最要用上的排前面"：关系阶段（调速用）→ 喜好 / 兴趣（挑话题）→ 禁忌（绕开）
+# → 年龄 / 情感状态 / 烦心事 / 攻略。**空的一律不出现**（见 `guide_profile_lines`）。
+GUIDE_PROFILE_LABELS: tuple[tuple[str, str], ...] = (
+    ("relation_stage", "关系阶段"),
+    ("likes", "喜好"),
+    ("interests", "兴趣"),
+    ("dislikes", "禁忌"),
+    ("age", "年龄"),
+    ("emotion_state", "情感状态"),
+    ("anxiety", "烦心事"),
+    ("strategy", "攻略"),
+)
+
+
+def guide_profile_lines(card: object) -> list[str]:
+    """对象攻略卡那八格里**非空**的几项，收成「名字：内容」的一列（v2-social-card-uiread）。
+
+    这八格是对象档案：前四个手动填（`v2-social-card-base`，建卡框里那四行），后四个由后台
+    提炼静默补（`v2-social-card-autodistill`，见 `life/mind/peer_distill.py`）。**写是写了，
+    读端此前一个都没有**——卡窗那格 `data` 原先只拼目标 / 背景 / 状态 / 打卡，卡详情页也不
+    显示，于是后台抽出来的东西在界面上一个字都看不到（用户看到的就是"这张卡全空"）。真机
+    实测：`card` 表 #3「对象攻略卡」八格里 `relation_stage='破冰'` / `interests='短剧'` /
+    `likes='被叫哥、打赌较劲'` 都填着，而卡窗 `data` 与卡面一个都没露。
+
+    这个函数就是补上的那一个读端：卡窗 `data`（`core/bootstrap.py::_card_chat_context`）与卡
+    详情页（`ui/panels/card_panel.py`）**共用它**，两处露的是同一批字，不各拼一套。
+
+    **纯读**：不碰盘、不碰库、不写、不改抽取那条线。八格全空（其余八类卡、或还没提炼过的
+    攻略卡）就回空列表——调用方据此整块收着，不留空框。
+    """
+    return [
+        f"{label}：{getattr(card, key, None)}"
+        for key, label in GUIDE_PROFILE_LABELS
+        if getattr(card, key, None)
+    ]
+
+
 class CardChatStore:
     """一张卡一个 JSON 文件，只装这张卡的对话。**跟 pet.db / mind.db 没有任何关系。**"""
 

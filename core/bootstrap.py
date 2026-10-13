@@ -55,7 +55,13 @@ from data.dao import (
 )
 from data.db import Database
 from focus.pomodoro import Phase, PomodoroService
-from life.cards.chat import LIFE_KIND, WORK_KIND, CardChatService, ensure_card_kb_root
+from life.cards.chat import (
+    LIFE_KIND,
+    WORK_KIND,
+    CardChatService,
+    ensure_card_kb_root,
+    guide_profile_lines,
+)
 from life.cards.layout import CardLayoutStore
 from life.cards.reminders import extract_reminder_nodes
 from life.cards.service import CardService
@@ -1509,6 +1515,16 @@ class DesktopPetApp:
             if card.trip_destination or card.trip_date:
                 when = card.trip_date.strftime("%Y-%m-%d") if card.trip_date else "还没定"
                 rows.append(f"出行：{card.trip_destination or '还没定目的地'} · {when}")
+            # 对象档案那八格（v2-social-card-uiread）：后台提炼把「对面这个人是谁」写进
+            # `card` 表那八列（`v2-social-card-autodistill`）之后，**此前卡窗这一格读不到
+            # 它们**——`data` 只拼目标 / 背景 / 状态 / 打卡，于是抽出来的东西用户一个字都
+            # 看不到（"这张卡全空"，真机实测 #3 卡那八格是有内容的）。补上这一段，卡窗的
+            # 小助手 / 攻略口径才读得到（跟卡详情页共用 `guide_profile_lines`，不各拼一套）。
+            # 其余八类卡这八列全是空的 → 一行都不加，卡窗提示词跟改之前逐字相同。
+            guide = guide_profile_lines(card)
+            if guide:
+                rows.append("对方档案（后台记下的，用来决定怎么接话）：")
+                rows.extend(guide)
             return {
                 "type": f"{card.theme}卡",
                 "title": card.title,

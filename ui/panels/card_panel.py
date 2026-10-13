@@ -43,7 +43,12 @@ from brain.chains.card_ai import ACTION_ADVISE, ACTION_GUIDE
 from core.config import Config
 from core.events import EventBus
 from data.models import Card
-from life.cards.chat import LIFE_KIND, CardChatService, card_namespace
+from life.cards.chat import (
+    LIFE_KIND,
+    CardChatService,
+    card_namespace,
+    guide_profile_lines,
+)
 from life.cards.layout import (
     BLOCK_ADVICE,
     BLOCK_CHAT,
@@ -192,6 +197,18 @@ class CardDetailPanel(QWidget):
         self._reset_button.clicked.connect(self._reset_layout)
         status_row.addWidget(self._reset_button)
         head.addLayout(status_row)
+
+        # 对象攻略卡那八格「对方档案」（v2-social-card-uiread）：后台提炼写进 card 表那八列
+        # 之后，**在此之前界面上一个地方都不显示**，用户看到的是"这张卡全空"。这里在卡头上
+        # 补一块只读小框把它列出来（跟卡窗那格 `data` 共用 `guide_profile_lines`，同一批字）。
+        # 八格全空的卡（其余八类，以及还没提炼过的攻略卡）整块收着，不占地方。
+        # **不是** `_refresh_profile_panes` 那一套（那是出行 / 餐饮 / 工作卡的画像建议，只以
+        # 建议形式露出、不暴露原始字段）；这一块只服务对象攻略卡、露的就是那八格原文。
+        self._guide_pane = QLabel("", self._head)
+        self._guide_pane.setObjectName("GuideProfilePane")
+        self._guide_pane.setWordWrap(True)
+        self._guide_pane.setVisible(False)
+        head.addWidget(self._guide_pane)
         self.board.add_block(BLOCK_HEAD, self._head)
 
         # ---- 上半·建议区：一张白卡，里面只有一块只读的建议框（占满剩余高度） ----
@@ -506,6 +523,7 @@ class CardDetailPanel(QWidget):
         self._loading = False
 
         self._apply_features(card)
+        self._refresh_guide_profile(card)
         self._refresh_profile_panes(card)
         # 建议区 / 出行那一行按卡藏了或露了，行跟着对上（见 ui/card_layout.py 的 sync）
         self.board.sync()
@@ -528,6 +546,17 @@ class CardDetailPanel(QWidget):
             (FEATURE_REMIND, self._remind_time),
         ):
             widget.setVisible(feature in features)
+
+    def _refresh_guide_profile(self, card: Card) -> None:
+        """把对象攻略卡那八格「对方档案」铺到卡头上（v2-social-card-uiread）。**只读**。
+
+        读端就一个（`life/cards/chat.py::guide_profile_lines`），卡窗那格 `data` 用的是
+        同一个——两处露的字一定一样，免得又出现"写在一个地方、读在另一个地方"的断链。
+        八格全空的卡整块收着（其余八类卡这八列本来就是 NULL）。
+        """
+        lines = guide_profile_lines(card)
+        self._guide_pane.setVisible(bool(lines))
+        self._guide_pane.setText("\n".join(lines))
 
     def _refresh_profile_panes(self, card: Card) -> None:
         """两半卡（指令 26-C C1/C2）：出行 / 工作 / 餐饮卡都亮「上半建议 + 下半工具」。
