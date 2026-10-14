@@ -198,6 +198,7 @@ OFFER_EXPIRED_NOTE = "（这条邀请过期了，不用管它）"
 # 这一格是**背景料**不是主体：塞多了会盖过"对方刚说了什么"这条主线，还会把提示词撑长。
 # 碎片只取最近几条、每条截断；画像 / 关系总述各只一句。
 PEER_PROFILE_FRAGMENTS = 3          # 最近几条碎片
+PEER_PROFILE_EVENTS = 2             # 共同经历最多带几条（v2-social-context-recall）
 PEER_PROFILE_CLIP = 40              # 每条碎片截到多少字
 # 画像各格在提示词里的中文名（`life/mind/store.py::_PROFILE_FIELDS` 那五项）。
 _PEER_PROFILE_LABELS = (
@@ -2508,8 +2509,22 @@ class DesktopPetApp:
 
         收一个对象名，回一句能直接进提示词的档案——**只取这一格**（`MindStore` 的
         `peer=` 那一维）：画像（叫 / 性别是 / 做 / 家里 / 情况是）、关系总述（眼下关系）、
-        最近几条碎片。取不到（没这个人 / 那一格是空的 / 记忆模块没装）就回空串，社交
-        那边整格不填——**宁可不注入，也别把主人那一档端出来当"对方"**。
+        **共同经历**（`ep_summary.events`）、最近几条碎片。取不到（没这个人 / 那一格是空的 /
+        记忆模块没装）就回空串，社交那边整格不填——**宁可不注入，也别把主人那一档端出来
+        当"对方"**。
+
+        v2-social-context-recall 补两处**同一种病的"写进去了、读不出来"**（跟上一批
+        `v2-social-card-uiread` 一个病根）：
+
+        - **`ep_summary.events` 以前从来没被读过。** `peer_distill._write` 一直把抽出来的
+          "事件"落进这一格，而这里只取 `rel_state`——隔天再聊时最该接上的"共同经历"
+          （上次那部剧、那个赌注）写进去了却没人拿。现在把它带出来（最多
+          `PEER_PROFILE_EVENTS` 条）。
+        - **攻略卡上那几列在起草这条路上一个读端都没有。** `autodistill` 把对象档案
+          **同时**写两处：三记忆库那一格（上面几样）与攻略卡那八列——而 `interests` /
+          `likes` / `strategy` **只在卡上有**（`_write` 不把它们往库里写）。看不见这一份，
+          草稿就不知道"他爱聊短剧、爱打赌较劲"。读端跟卡窗那格**共用**
+          `life/cards/chat.py::guide_profile_lines`（一批只有一个读端）。
 
         为什么在这儿、而不是在社交那个模块里直接读库：社交这条线**一个库都不碰**
         （见 `SocialReplyService` 开头的口径），分格坐标 `_peer_key` 也在记忆模块里；
@@ -2525,9 +2540,17 @@ class DesktopPetApp:
             facts = [f"{label}{who[key]}" for key, label in _PEER_PROFILE_LABELS if who.get(key)]
             if facts:
                 bits.append("、".join(facts))
-            rel = str((store.ep(peer=peer) or {}).get("rel_state") or "").strip()
+            summary = store.ep(peer=peer) or {}
+            rel = str(summary.get("rel_state") or "").strip()
             if rel:
                 bits.append(f"眼下关系：{rel}")
+            events = [
+                str(item).strip()[:PEER_PROFILE_CLIP]
+                for item in (summary.get("events") or [])
+            ]
+            events = [item for item in events if item]
+            if events:
+                bits.append("共同经历：" + "；".join(events[-PEER_PROFILE_EVENTS:]))
             frags = [
                 str(row.get("text") or "").strip()[:PEER_PROFILE_CLIP]
                 for row in store.fragments(limit=PEER_PROFILE_FRAGMENTS, peer=peer)
@@ -2535,10 +2558,43 @@ class DesktopPetApp:
             frags = [f for f in frags if f]
             if frags:
                 bits.append("最近记下的：" + "；".join(frags))
+            # 卡上那一份**只在"这个人本来就有记录"时才补**：攻略卡全库只有一张、代表
+            # "眼下这一个对象"，而这一手是**按对象名**问的——名字对不上（库里没有这一格）
+            # 就不该把那张卡的内容端给"查无此人"（老口径：认不出的人回空串）。真机上
+            # `autodistill` 是**同一份结论写两处**，所以卡上有内容时这一格一定有记录。
+            if bits:
+                card_bits = self._guide_card_bits()
+                if card_bits:
+                    bits.append("卡上记的：" + "；".join(card_bits))
         except Exception as exc:      # noqa: BLE001 —— 见上：辅助料不该挡住起草
             logger.debug("对象档案取不出来（%s），这一格不摆", exc)
             return ""
         return "；".join(bits)
+
+    def _guide_card_bits(self) -> list[str]:
+        """「对象攻略卡」八格里**非空**的那几项（v2-social-context-recall）。**纯读**。
+
+        `autodistill` 抽出来的对象档案走两条路落地：三记忆库那一格（`_peer_profile_for`
+        上面几样）与攻略卡那八列（`_write_guide_card_fields` → `CardService.set_profile`）。
+        而 `interests` / `likes` / `strategy` / `dislikes` **只在卡上**——`peer_distill._write`
+        从不把它们往库里写。所以起草要看得到"他爱聊短剧、爱打赌较劲、别急着认哥"，就必须
+        读卡这一份。
+
+        读端就是 `v2-social-card-uiread` 补的那**唯一**一个（`life/cards/chat.py::guide_profile_lines`）
+        ——卡窗 `data`、卡详情页、这里三处端的都是同一批字，不各拼一套。
+
+        卡不存在（用户还没开这张卡）/ `card_service` 没装 / 八格全空 → 回空列表，一个字不加。
+        """
+        if self.card_service is None:
+            return []
+        try:
+            card = self.card_service.find_card(CARD_CATEGORY, GUIDE_CARD_TITLE)
+        except Exception as exc:      # noqa: BLE001 —— 辅助料不该挡住起草
+            logger.debug("对象攻略卡取不出来（%s），这几格不摆", exc)
+            return []
+        if card is None:
+            return []
+        return guide_profile_lines(card)
 
     def _to_physical(self, rect):
         """Qt 的**逻辑像素**矩形 → 抓屏那张帧上的**物理像素**矩形。

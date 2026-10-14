@@ -3219,7 +3219,13 @@ class SocialReplyService(QObject):
                 logger.debug("对象档案取不出来（%s），这一格不摆", exc)
                 profile = ""
             if profile:
-                parts.append(f"我手上关于他的记录：{profile}")
+                # v2-social-memory-role-guard：**把归属说死**。这一格端出来的每一条都是
+                # 「他说的」（画像 / 关系 / 共同经历 / 碎片 / 卡上那几格，一个都不是用户
+                # 自己说的）——而这一趟要写的偏偏是**用户**发出去的话。真机就是这么串的：
+                # 茗风说"我老家桂林的"，桌宠替用户回"桂林啊…我住象山区"。光靠底牌那句
+                # "原文不许出现在回话里"挡不住**挪用**（那不是复述，是搬进第一人称）。
+                # 这句跟 `SOCIAL_PEER_PROFILE_BLOCK` 里那条纪律一起读，两处都不许松。
+                parts.append(f"我手上关于他的记录（**都是他说过的**，没有一条是你说过的）：{profile}")
         if not parts:
             return ""
         return SOCIAL_PEER_PROFILE_BLOCK.format(peer_profile="；".join(parts))
