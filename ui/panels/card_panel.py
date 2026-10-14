@@ -60,6 +60,7 @@ from life.cards.layout import (
 from life.cards.service import CardService, is_diet_card, is_trip_card
 from life.cards.templates import (
     CARD_STATUS_TITLES,
+    EMOTION_CATEGORY,
     FEATURE_ADVISE,
     FEATURE_CHECKIN,
     FEATURE_GUIDE,
@@ -178,6 +179,30 @@ class CardDetailPanel(QWidget):
         self._title = QLabel("", self._head)
         self._title.setObjectName("TitleLabel")
         head.addWidget(self._title)
+
+        # 卡身份（v2-social-card-identity）：对象攻略卡顶部多一行「卡名 + 标签」。
+        # 卡名可改（改名只动 `card.name`，不动查重归属 `card.peer_name`），标签是用户
+        # 自打的分类（暧昧对象 / 同事 / 闺蜜…）。其余八类卡没有"对象"这回事，整块收着。
+        self._identity = QWidget(self._head)
+        identity = QVBoxLayout(self._identity)
+        identity.setContentsMargins(0, 0, 0, 0)
+        identity.setSpacing(6)
+        name_row = QHBoxLayout()
+        name_row.addWidget(QLabel("卡名", self._identity))
+        self._name_edit = QLineEdit(self._identity)
+        self._name_edit.setPlaceholderText("对象名·攻略卡")
+        self._name_edit.editingFinished.connect(self._save_name)
+        name_row.addWidget(self._name_edit, 1)
+        identity.addLayout(name_row)
+        tags_row = QHBoxLayout()
+        tags_row.addWidget(QLabel("标签", self._identity))
+        self._tags_edit = QLineEdit(self._identity)
+        self._tags_edit.setPlaceholderText("暧昧对象 / 同事 / 闺蜜（空格或、分开）")
+        self._tags_edit.editingFinished.connect(self._save_tags)
+        tags_row.addWidget(self._tags_edit, 1)
+        identity.addLayout(tags_row)
+        self._identity.setVisible(False)
+        head.addWidget(self._identity)
 
         status_row = QHBoxLayout()
         self._meta = QLabel("", self._head)
@@ -428,7 +453,7 @@ class CardDetailPanel(QWidget):
         if self.card_chat.namespace == namespace:
             return
         history = self._chat_service.history(namespace) if self._chat_service else []
-        self.card_chat.bind(namespace, card.title, history)
+        self.card_chat.bind(namespace, card.display_name(), history)
 
     def _bind_card_tools(self, namespace: str) -> None:
         """把这张卡的小部件铺到卡面上（v2-card-tools-B）。
@@ -504,8 +529,17 @@ class CardDetailPanel(QWidget):
         last_text = f" · 最近打卡 {last.strftime('%m-%d %H:%M')}" if last else ""
 
         self._loading = True
-        self._title.setText(f"{card.icon} {card.title}" if card.icon else card.title)
+        self._title.setText(
+            f"{card.icon} {card.display_name()}" if card.icon else card.display_name()
+        )
         self._meta.setText(f"{card.theme} · 已打卡 {count} 次{last_text}")
+        # 卡身份（v2-social-card-identity）：只有对象攻略卡有「对象名 + 标签」可改；
+        # 其余八类卡 `card.name` 是 NULL，`display_name()` 直接退回 `card.title`。
+        is_guide = card.theme == EMOTION_CATEGORY
+        self._identity.setVisible(is_guide)
+        if is_guide:
+            self._name_edit.setText(card.name or "")
+            self._tags_edit.setText("、".join(card.tag_list()))
         self._status.setCurrentText(CARD_STATUS_TITLES.get(card.status, card.status))
         # 下拉里显示"真的在说话的那位"：出行卡默认是导游、饮食卡默认是营养主厨
         # （卡上没显式绑过角色时，服务按主题给一个默认的，见 CardService.persona_of）
@@ -656,6 +690,23 @@ class CardDetailPanel(QWidget):
         self._advice_card_id = None
         self._service.set_persona(self._card_id, str(self._persona.currentData() or ""))
 
+    def _save_name(self) -> None:
+        """改卡名（v2-social-card-identity）：只动 `card.name`，查重归属 `card.peer_name`
+        一字不动，所以改完名下次同会话建卡仍会复用这张卡。"""
+        if self._loading or self._card_id is None:
+            return
+        self._service.set_name(self._card_id, self._name_edit.text().strip())
+
+    def _save_tags(self) -> None:
+        """打分类标签（v2-social-card-identity）：一串字按空格 / 顿号 / 逗号 / 斜杠切开。"""
+        if self._loading or self._card_id is None:
+            return
+        raw = self._tags_edit.text()
+        for sep in ("、", "，", ",", "/", "／"):
+            raw = raw.replace(sep, " ")
+        parts = [p.strip() for p in raw.split() if p.strip()]
+        self._service.set_tags(self._card_id, parts)
+
     def _checkin(self) -> None:
         if self._card_id is None:
             return
@@ -707,7 +758,7 @@ class CardDetailPanel(QWidget):
             last.strftime("%m-%d %H:%M") if last else "",
         )
         folder = QStandardPaths.writableLocation(QStandardPaths.DesktopLocation)
-        default = f"{folder}/{card.title}.png" if folder else f"{card.title}.png"
+        default = f"{folder}/{card.display_name()}.png" if folder else f"{card.display_name()}.png"
         path, _selected = QFileDialog.getSaveFileName(
             self, "把这张卡存成图片", default, "PNG 图片 (*.png)"
         )

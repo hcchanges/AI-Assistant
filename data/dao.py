@@ -488,6 +488,9 @@ class CardDAO:
         persona_id: str | None = None,
         icon: str | None = None,
         profile: dict[str, str] | None = None,
+        name: str | None = None,
+        peer_name: str | None = None,
+        tags: list[str] | None = None,
     ) -> Card:
         now = datetime.now()
         with self._session_factory() as session:
@@ -506,6 +509,11 @@ class CardDAO:
                 plaza_pos=int(top) + 1,
                 created_at=now,
                 updated_at=now,
+                # 卡身份那三格（v2-social-card-identity）：只有对象攻略卡那条建卡路会传，
+                # 其余卡 / 老调用点不传就是 NULL / 空串，一个字都不变。
+                name=(name or "").strip() or None,
+                peer_name=(peer_name or "").strip() or None,
+                tags=",".join(str(t).strip() for t in (tags or []) if str(t).strip()),
                 # 对象档案那几格（v2-social-card-base / -autodistill）：不传就是 NULL，
                 # 九类卡一视同仁
                 **_profile_columns(profile),
@@ -550,6 +558,31 @@ class CardDAO:
             if card is None:
                 return
             card.title = title
+            card.updated_at = datetime.now()
+            session.commit()
+
+    def set_name(self, card_id: int, name: str) -> None:
+        """改这张卡的**显示名**（v2-social-card-identity）。
+
+        **只动 `name`，不动 `title` / `peer_name`**：`peer_name` 是查重归属字段，改名
+        不许把它带跑——不然同名对象下一次建卡就查不到"已经有这张"了。空串照存成空串
+        （用户把名字清掉 = 退回显示 `title`），这里不替调用方决定。
+        """
+        with self._session_factory() as session:
+            card = session.get(Card, card_id)
+            if card is None:
+                return
+            card.name = (name or "").strip()
+            card.updated_at = datetime.now()
+            session.commit()
+
+    def set_tags(self, card_id: int, tags: list[str]) -> None:
+        """改写这张卡的分类标签（v2-social-card-identity）。逗号分隔存，跟 `features` 一个口径。"""
+        with self._session_factory() as session:
+            card = session.get(Card, card_id)
+            if card is None:
+                return
+            card.tags = ",".join(str(t).strip() for t in (tags or []) if str(t).strip())
             card.updated_at = datetime.now()
             session.commit()
 

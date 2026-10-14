@@ -54,7 +54,7 @@ def _paint(painter: QPainter, card: Card, checkin_count: int, last_checkin: str)
     # 标题
     painter.setPen(QColor(TEXT))
     painter.setFont(QFont(painter.font().family(), 20, QFont.Bold))
-    painter.drawText(QRect(left, int(body.top()) + PADDING + 26, width, 40), Qt.AlignLeft, card.title)
+    painter.drawText(QRect(left, int(body.top()) + PADDING + 26, width, 40), Qt.AlignLeft, card.display_name())
 
     # 目标（自动换行，最多占三行的高度）
     painter.setPen(QColor(TEXT))

@@ -138,7 +138,7 @@ class LifePanel(QWidget):
     def _life_card(card, count: int) -> CarouselCard:
         return CarouselCard(
             key=card.id,
-            title=f"{card.icon} {card.title}" if card.icon else card.title,
+            title=f"{card.icon} {card.display_name()}" if card.icon else card.display_name(),
             theme=card.theme,
             status=f"{CARD_STATUS_TITLES.get(card.status, card.status)} · 打卡 {count} 次",
             accent=card_theme_color(card.theme),
@@ -224,7 +224,7 @@ class LifePanel(QWidget):
 
     @staticmethod
     def _card_line(card) -> str:
-        return f"{card.icon} {card.title}（{card.theme}）" if card.icon else f"{card.title}（{card.theme}）"
+        return f"{card.icon} {card.display_name()}（{card.theme}）" if card.icon else f"{card.display_name()}（{card.theme}）"
 
     def _book_row(self, card, count: int) -> tuple[int, str, str]:
         """卡册里一行：主行是卡名，副行是分类 + 打卡次数 + 最近一次（历史查得到）。"""

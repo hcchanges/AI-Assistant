@@ -175,6 +175,14 @@ class Card(Base):
     trip_date: Mapped[datetime | None] = mapped_column(DateTime, default=None)
     # 卡面图标（指令 25-A 第 3 项）：只有自建卡会带；空 = 不画图标
     icon: Mapped[str | None] = mapped_column(String(8), default=None)
+    # ---------- 卡身份（v2-social-card-identity） ----------
+    # 对象攻略卡按"对象是谁"挂名：`name` 是**显示名**（建卡时写 `对象名·攻略卡`，可改），
+    # `peer_name` 是**查重归属**（原始对象名，改名不动它），`tags` 是用户自打的分类标签
+    # （逗号分隔存，跟 `features` 一个口径）。其余八类卡这三格建出来都是 NULL / 空，
+    # 老库那批卡同样——`data/db.py::_add_missing_columns` 只补可空列，加列即兼容。
+    name: Mapped[str | None] = mapped_column(String(64), default=None)     # 显示名（挂名）
+    peer_name: Mapped[str | None] = mapped_column(String(64), default=None)  # 查重归属（对象名）
+    tags: Mapped[str] = mapped_column(String(255), default="")             # 分类标签（逗号分隔）
     # ---------- 对象档案（v2-social-card-base） ----------
     # 对象攻略卡专用的四个结构化格子：原先对方信息只有《对方信息.md》那一整段自由文本，
     # 帮聊那条线要按"喜好 / 禁忌 / 攻略策略 / 到哪一步了"分开取用，自由文本没法分开取。
@@ -219,6 +227,19 @@ class Card(Base):
     def feature_list(self) -> list[str]:
         """这张卡开了哪些 AI 能力。"""
         return [part for part in self.features.split(",") if part.strip()]
+
+    def tag_list(self) -> list[str]:
+        """这张卡上的分类标签（v2-social-card-identity）。逗号分隔存，空串回空列表。"""
+        return [part for part in self.tags.split(",") if part.strip()]
+
+    def display_name(self) -> str:
+        """卡面该显示的名字（v2-social-card-identity）：挂了名就用 `name`，没挂退回 `title`。
+
+        对象攻略卡建卡时写 `name = 对象名·攻略卡`，其余卡、老卡 `name` 都是 NULL，退回
+        `title` —— 界面 / 轮播 / 卡册 / 存图共用这一个，别各拼一套（挂名之前显示的就该
+        跟原来逐字一样）。
+        """
+        return self.name or self.title
 
 
 class CardCheckin(Base):

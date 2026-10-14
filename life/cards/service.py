@@ -430,6 +430,23 @@ class CardService:
             return card
         return None
 
+    def find_card_by_peer(self, peer_name: str) -> Card | None:
+        """按**对象名**找那张攻略卡（v2-social-card-identity）；没有就给 None。
+
+        跟 `find_card` 一个口径：只在轮播上（`list_by_archived(False)`）找，收进卡册的那张
+        不算"已经有了"；比对的是 `card.peer_name`（**查重归属字段**），不是可改的
+        `card.name`——用户把显示名改了，下一次按同一个对象名来查照样命中，不会又建一张。
+
+        对象名是隐私：这里只拿它当键比，不落盘、不进日志（调用方也只记 `len()`）。
+        """
+        peer = (peer_name or "").strip()
+        if not peer:
+            return None
+        for card in self._card_dao.list_by_archived(False):
+            if card.peer_name == peer:
+                return card
+        return None
+
     def resolve_invite(self, theme: str, accepted: bool) -> None:
         """用户答复了邀请：记下结果。拒绝的会静默一段时间，这是"限频"的一部分。"""
         self._invite_dao.resolve(self._user_id, theme, accepted)
@@ -572,6 +589,9 @@ class CardService:
         icon: str,
         description: str,
         profile: dict[str, str] | None = None,
+        name: str | None = None,
+        peer_name: str | None = None,
+        tags: list[str] | None = None,
     ) -> Card | None:
         """同 `create_manual`，但返回**整张卡**（不是卡名）——要往卡专属知识库写东西
         的调用方（比如对象攻略卡抽完信息要落库）需要拿到 `card.id` / `card.kb_path`。
@@ -584,18 +604,29 @@ class CardService:
         （喜好 / 禁忌 / 攻略策略 / 关系阶段，见 `data/models.py::Card`）。不传就是 NULL，
         九类卡一视同仁。**同类同名撞上既有卡时也照写**——用户这次填的四格不能因为
         "卡本来就有"丢掉；不传 profile 的老调用点行为一字未变。
+
+        ``name`` / ``peer_name`` / ``tags``（v2-social-card-identity）：对象攻略卡的
+        **卡身份**三格。`name` 是显示名（`对象名·攻略卡`）、`peer_name` 是查重归属
+        （原始对象名，改名不动它）、`tags` 是分类标签。只有对象攻略卡那条建卡路会传，
+        其余卡不传就是 NULL / 空串，行为与加这三格之前一模一样。
         """
         category = (category or "").strip()
         if category not in LIFE_CATEGORIES:
             return None
         # 卡名先算出来（跟落库时同一个口径），查重与建卡用的都是它
         final_title = (title or category).strip()[:CARD_TITLE_MAX] or category
-        # **同类同名不再重复建**（v2-social-card-dedup）：把这个大类下**已经有**的那张
-        # 原样交回去，让调用方接着用它（比如把对方信息写进**它**的专属库）。
-        #
-        # 放在卡位那一关**前面**是故意的：卡位满了也该认得出现有那张（"建不了新的"
-        # 与"你已经有这张了"是两件事），否则对象攻略卡那条路会在卡位满时谎报"卡位满了"。
-        existing = self.find_card(category, final_title)
+        peer = (peer_name or "").strip()
+        if peer:
+            # **按对象名查重**（v2-social-card-identity）：挂得出对象名，就**只**按对象名查。
+            # 别再退回按标题查——标题「对象攻略卡」是所有攻略卡共用的，多对象一人一张、
+            # 标题全一样，按标题查会把别人的卡当成"这张"。
+            existing = self.find_card_by_peer(peer)
+        else:
+            # **同类同名不再重复建**（v2-social-card-dedup）：认不出对象名（没挂名）才退回
+            # 老口径，按大类 + 卡名查。放在卡位那一关**前面**是故意的：卡位满了也该认得出现有
+            # 那张（"建不了新的"与"你已经有这张了"是两件事），否则对象攻略卡那条路会在
+            # 卡位满时谎报"卡位满了"。
+            existing = self.find_card(category, final_title)
         if existing is not None:
             logger.info(
                 "大类「%s」下已经有「%s」这张卡了（#%d），不再重复建",
@@ -623,6 +654,9 @@ class CardService:
             persona_id=self._owner_persona(category),
             icon=icon,
             profile=profile,
+            name=name,
+            peer_name=peer_name,
+            tags=tags,
         )
         self._attach_kb(card)
         self._remember_card(card, category)
@@ -814,6 +848,16 @@ class CardService:
 
     def set_goal(self, card_id: int, goal: str) -> None:
         self._card_dao.set_goal(card_id, goal)
+        self._bus.card_changed.emit()
+
+    def set_name(self, card_id: int, name: str) -> None:
+        """改这张卡的**显示名**（v2-social-card-identity）。只动 `name`，不动查重归属。"""
+        self._card_dao.set_name(card_id, name)
+        self._bus.card_changed.emit()
+
+    def set_tags(self, card_id: int, tags: list[str]) -> None:
+        """改写这张卡的分类标签（v2-social-card-identity）。"""
+        self._card_dao.set_tags(card_id, tags)
         self._bus.card_changed.emit()
 
     def set_persona(self, card_id: int, persona_id: str) -> None:

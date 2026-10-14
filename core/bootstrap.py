@@ -200,6 +200,7 @@ OFFER_EXPIRED_NOTE = "（这条邀请过期了，不用管它）"
 PEER_PROFILE_FRAGMENTS = 3          # 最近几条碎片
 PEER_PROFILE_EVENTS = 2             # 共同经历最多带几条（v2-social-context-recall）
 PEER_PROFILE_CLIP = 40              # 每条碎片截到多少字
+GUIDE_CARD_NAME_SUFFIX = "·攻略卡"   # 对象攻略卡挂名后缀：`对象名·攻略卡`（v2-social-card-identity）
 # 画像各格在提示词里的中文名（`life/mind/store.py::_PROFILE_FIELDS` 那五项）。
 _PEER_PROFILE_LABELS = (
     ("name", "叫"),
@@ -1528,7 +1529,7 @@ class DesktopPetApp:
                 rows.extend(guide)
             return {
                 "type": f"{card.theme}卡",
-                "title": card.title,
+                "title": card.display_name(),
                 "brief": "用户自己认领的一张生活卡",
                 "data": "\n".join(r for r in rows if r),
                 # 这张卡的专属知识库落点（v2-card-kb）：建卡时已填，老卡没有就现算并补建目录
@@ -2487,13 +2488,18 @@ class DesktopPetApp:
           原本只在建卡弹框里填，没人在卡开着的时候改），而这一批是**随时可能**补上来
           的，不发一声卡面 / 轮播不会跟着重排。
 
-        `peer` 这一格收进来是为了跟提炼器那边的接口对齐；**写卡不看它是谁**——「对象攻
-        略卡」本来就只有一张（`find_card` 按大类 + 卡名查重），卡上记的就是「眼下这一个
-        对象」。
+        `peer` 这一格收进来是为了跟提炼器那边的接口对齐；**写卡按对象名找卡**
+        （v2-social-card-identity：`find_card_by_peer` 按 `card.peer_name` 查），对象名
+        认不出 / 老卡没挂名时退回 `find_card` 按大类 + 卡名查那一张。
         """
         if self.card_service is None or not fields:
             return
-        card = self.card_service.find_card(CARD_CATEGORY, GUIDE_CARD_TITLE)
+        peer_key = (peer or "").strip()
+        # 先按对象名找（挂名之后一人一张）；对象名认不出、或这张卡还没挂名（老卡 / 手动建的）
+        # 就退回按大类 + 卡名找那一张——补格是"往既有卡上写"，卡没挂名也得找得到它。
+        card = self.card_service.find_card_by_peer(peer_key) if peer_key else None
+        if card is None:
+            card = self.card_service.find_card(CARD_CATEGORY, GUIDE_CARD_TITLE)
         if card is None:
             logger.debug(
                 "对象攻略卡：这轮抽到 %d 格，但卡不在（被收进卡册了？），只进记忆库",
@@ -3366,14 +3372,27 @@ class DesktopPetApp:
             if not accepted:
                 self.bus.pet_speak.emit("好，那先不建，这几段你挑着用。")
             return
-        # 已经有这张卡了就别再说"建好了"（v2-social-card-dedup）：`create_manual_card`
-        # 查到同类同名会把**既有那张**交回来，那段对方信息写进的是它的专属库——
+        # 卡身份（v2-social-card-identity）：这一场对着的是谁（社交那条线认出来的会话名，
+        # 如"茗风"）。认得出就把卡挂成 `对象名·攻略卡`、查重按对象名走；认不出就退回
+        # 老口径（标题"对象攻略卡"、按同类同名查重）——一个字节都不改老行为。
+        peer = (getattr(self.social_reply, "_peer_name", "") or "").strip()
+        display = f"{peer}{GUIDE_CARD_NAME_SUFFIX}" if peer else GUIDE_CARD_TITLE
+        # 已经有这张卡了就别再说"建好了"（v2-social-card-dedup + -identity）：先按对象名、
+        # 再按同类同名把**既有那张**找回来，那段对方信息写进的是它的专属库——
         # 话得说成"写进那张里了"，不能谎报新建了一张。
-        existing = self.card_service.find_card(CARD_CATEGORY, GUIDE_CARD_TITLE)
+        # 挂得出对象名就**只**按对象名查（标题是所有攻略卡共用的，按标题查会把别人的卡
+        # 当成"这张"）；认不出对象名才退回老口径按同类同名查。
+        existing = (
+            self.card_service.find_card_by_peer(peer)
+            if peer
+            else self.card_service.find_card(CARD_CATEGORY, GUIDE_CARD_TITLE)
+        )
         card = (
             existing if existing is not None
             else self.card_service.create_manual_card(
-                CARD_CATEGORY, GUIDE_CARD_TITLE, GUIDE_CARD_ICON, GUIDE_CARD_GOAL
+                CARD_CATEGORY, GUIDE_CARD_TITLE, GUIDE_CARD_ICON, GUIDE_CARD_GOAL,
+                name=display if peer else None,
+                peer_name=peer or None,
             )
         )
         if card is None:
@@ -3383,10 +3402,10 @@ class DesktopPetApp:
         self._schedule_guide_reminders(card, edited)
         if existing is not None:
             self.bus.pet_speak.emit(
-                f"「{GUIDE_CARD_TITLE}」你已经有一张了，这段对方信息我写进那张里了。"
+                f"「{display}」你已经有一张了，这段对方信息我写进那张里了。"
             )
             return
-        self.bus.pet_speak.emit(f"「{GUIDE_CARD_TITLE}」建好了，对方信息也存进它专属的知识库了。")
+        self.bus.pet_speak.emit(f"「{display}」建好了，对方信息也存进它专属的知识库了。")
 
     def _write_guide_card_kb(self, card, text: str) -> None:
         """把（用户改过的）对方信息写进这张卡的专属知识库（v2-card-kb）。
