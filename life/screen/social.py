@@ -280,6 +280,15 @@ _CHAT_TIME_LINE = re.compile(
     rf"(?:(?:{_CHAT_DATE})[\s·]*)?(?:上午|下午|中午|凌晨|晚上)?\s*\d{{1,2}}:\d{{2}}(?::\d{{2}})?"
     rf"|(?:{_CHAT_DATE})"
 )
+# 时间戳的**宽松版**（v2-social-chrome-ocr-robust）：允许日期词的首字被 OCR 认错
+# （"昨"→"作"这类形近/同音字）。判据是**结构**不是扩词表——整行 = [短日期词][时段] + 时间，
+# 且时间必须落在行尾："我下午3:00到"时间夹在中间、行尾还有字，不算；"作天22:41"整行被
+# 这一结构吃掉，算。`[一-龥]{1,2}天` 兜住昨天/今天/前天及其错字变体（作天/令天…）。
+_CHAT_TIME_LOOSE = re.compile(
+    rf"^(?:[一-龥]{{1,2}}天|星期[一二三四五六日天]"
+    rf"|\d{{1,2}}月\d{{1,2}}日|\d{{4}}年\d{{1,2}}月\d{{1,2}}日)?"
+    rf"[\s·]*(?:上午|下午|中午|凌晨|晚上)?\s*\d{{1,2}}:\d{{2}}(?::\d{{2}})?$"
+)
 _CHAT_CHROME_LINE = re.compile(
     r"以下为新消息|查看更多消息|现在可以开始聊天了|该消息已过期|"
     r"消息已发出，但被对方拒收|撤回了一条消息|拍了拍|\d+\s*条新消息"
@@ -340,7 +349,7 @@ def _is_chat_chrome(text: object) -> bool:
         return True
     if _is_chat_placeholder(body):
         return True
-    return bool(_CHAT_TIME_LINE.fullmatch(body))
+    return bool(_CHAT_TIME_LINE.fullmatch(body) or _CHAT_TIME_LOOSE.fullmatch(body))
 
 
 # 「这一屏还在加载」的占位文案（v2-social-list-leak-fix）。
@@ -952,6 +961,20 @@ def _is_fragment_material(text: str, others) -> bool:
     return False
 
 
+def _is_chrome_fragment(text: object) -> bool:
+    """整段材料是不是**时间戳/日期形状**（含 OCR 错字），不是一句能接的话。
+
+    v2-social-chrome-ocr-robust 的主刀：`_message_material` 是**逐行**挑装潢
+    （`_is_chat_chrome`），可一条消息折成几行 / 首字被认错时，整段拼回来仍可能是一条
+    跨天分隔线（"作天22:41"）。`_tail_context` 取到这一条时当碎片跳过、接着往上找真正
+    的那句——跟 `_is_fragment_material` 同一套"不算材料就往上一句找"。
+    """
+    body = _fold(text)
+    if not body:
+        return True
+    return bool(_CHAT_TIME_LINE.fullmatch(body) or _CHAT_TIME_LOOSE.fullmatch(body))
+
+
 def _tail_lines(text: object, limit: int = CHAT_CONTEXT_CLIP) -> str:
     """对方那屏字：**按整行**从末尾往前留，最多约 `limit` 个字——绝不切半句。
 
@@ -1080,7 +1103,7 @@ def _tail_context(read: ChatRead, limit: int = CHAT_CONTEXT_CLIP) -> str:
         if message.sender != SENDER_OTHER:
             continue              # 认不出说话人的行不当材料（老口径一样）
         body = _message_material(message)
-        if body and not _is_fragment_material(body, others):
+        if body and not _is_fragment_material(body, others) and not _is_chrome_fragment(body):
             tail.append(body)
             break                 # ★ 批次8-A：只取这一条，不再往前卷（见下面那段）
         # 这一条是**碎片**（纯 @提及 / 光秃秃一个短名 / 装潢）：不算数，接着往**上**找
@@ -1094,7 +1117,7 @@ def _tail_context(read: ChatRead, limit: int = CHAT_CONTEXT_CLIP) -> str:
         # "没认到对方说了什么"，他明明看得见对方刚说的那句）。碎片照样不收（见上一段）。
         latest = read.latest_other
         body = _message_material(latest) if latest is not None else ""
-        if body and not _is_fragment_material(body, others):
+        if body and not _is_fragment_material(body, others) and not _is_chrome_fragment(body):
             tail = [body]
     if not tail:
         return ""
