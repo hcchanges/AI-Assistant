@@ -114,6 +114,7 @@ OFFLINE = (
     "test_social_stage_guard_anchor.py",
     "test_social_card_identity.py",
     "test_social_chrome_ocr_robust.py",
+    "test_social_card_exists_peer.py",
     "test_multimodal.py",
     "test_mood_fix.py",
     "test_mood_horror.py",

@@ -572,13 +572,13 @@ class DesktopPetApp:
             )
             # 对象视角提炼（v2-social-card-autodistill）：聊完一轮，把「对方是谁」补进
             # 对象攻略卡与三记忆库的 peer 格。两只手都在这一层注入——「这张卡在不在」用
-            # 现成的 `_guide_card_exists`（它不吃参数，包一层对成「按对象名问」）、
+            # 现成的 `_guide_card_exists`（吃对象名：按对象名问，退回老卡/未挂名卡）、
             # 「把结论写上去」走 `_write_guide_card_fields`。提炼器**不 import 任何卡
             # 模块**，跟社交那条线不碰库是同一条口径：谁的东西谁自己拿手。
             self.peer_distiller = PeerDistiller(
                 config=config,
                 store=self.mind_store,
-                card_exists=lambda peer: self._guide_card_exists(),
+                card_exists=lambda peer: self._guide_card_exists(peer),
                 write_card=self._write_guide_card_fields,
             )
             self.mind_proactive = MindProactiveService(
@@ -2460,18 +2460,29 @@ class DesktopPetApp:
         cards += [card for card, _count in self.card_service.card_book()]
         return cards
 
-    def _guide_card_exists(self) -> bool:
-        """「对象攻略卡」是不是**已经在轮播上**了（v2-social-card-dedup）。
+    def _guide_card_exists(self, peer: str = "") -> bool:
+        """「对象攻略卡」是不是已经在轮播上了。
 
-        社交那条线每次要问"要不要建对象攻略卡"之前现问一次。判据就是
-        `CardService.find_card`——**一条不另写**：大类 + 卡名两条都对上、且**没归档**
-        （收进卡册的那张不算，再建一张新的正好顶上轮播的位子，见 `find_card` 的说明）。
+        两条路（v2-social-card-exists-peer）：
+
+        - **给了对象名**（autodistill 按对象名问）：先 `find_card_by_peer(peer)`——挂名之后
+          一人一张、按对象名查才不串；查不到退回「老卡 / 还没挂名的卡」（无 `peer_name`、
+          只有标题「对象攻略卡」那张通用卡）——**有别人卡（`peer_name` 非空）的不算**，否则
+          会把没卡的人误放进别人的卡、抽进别人的卡里。
+        - **没给对象名**（建卡查重那条 offer_card）：退回老口径 `find_card` 按大类 + 卡名
+          查——那一问只关心「有没有这张卡」，不关心是谁的。
+
+        两边都要求**没归档**（收进卡册的那张不算，`find_card` 的说明）。
         """
         if self.card_service is None:
             return False
-        return self.card_service.find_card(
-            CARD_CATEGORY, GUIDE_CARD_TITLE
-        ) is not None
+        peer_key = (peer or "").strip()
+        if peer_key:
+            if self.card_service.find_card_by_peer(peer_key) is not None:
+                return True
+            card = self.card_service.find_card(CARD_CATEGORY, GUIDE_CARD_TITLE)
+            return card is not None and not (card.peer_name or "").strip()
+        return self.card_service.find_card(CARD_CATEGORY, GUIDE_CARD_TITLE) is not None
 
     def _write_guide_card_fields(self, peer: str, fields: dict) -> None:
         """把对象视角提炼抽出来的那几格补进「对象攻略卡」（v2-social-card-autodistill）。
