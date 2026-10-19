@@ -87,7 +87,15 @@ from core.worker import run_async
 from life.screen import shot
 from life.screen import motion
 from life.screen.browser import TITLE_FOCUS, TITLE_WATCH, classify_title, is_browser
-from life.screen.mood_cv import MoodCvReader
+from life.screen.emotion_backend import (
+    BACKEND_JEV,
+    BACKEND_LLM,
+    ENV_BACKEND,
+    EmotionJudge,
+    LocalBackend,
+    load_env as load_emotion_env,
+)
+from life.screen.mood_cv import MoodCvReader, MoodVerdict
 from life.screen.mood_fuse import fuse
 from life.screen.mood_cloud import MoodCloudReader
 from life.screen.vote import SceneVoter
@@ -300,6 +308,78 @@ def classify_text(text: str) -> str | None:
         if hits > best_hits:
             best, best_hits = scene, hits
     return best
+
+
+# ---------- 情绪判定后端接线（v2-social-emotion-wire） ----------
+#
+# 只有环境里**显式**写了 `EMOTION_BACKEND=jev|llm` 才走这条接线；不设、写 `local`、
+# 写错值，一律维持原来的本地逻辑（MoodCvReader / MoodCloudReader）——既有行为与
+# 类型断言逐字不变。显式指定是"用户自己开的口子"，不是默认路径。
+
+
+def _emotion_env() -> dict[str, str]:
+    """读情绪后端的开关（`os.environ` 优先，项目根 `.env` 补缺）。测试可替换。"""
+    return load_emotion_env()
+
+
+def _forced_backend(values: dict[str, str]) -> str:
+    """显式指定的后端名；没指定 / `local` / 写错值都返回空串。"""
+    name = str(values.get(ENV_BACKEND) or "").strip().lower()
+    return name if name in (BACKEND_JEV, BACKEND_LLM) else ""
+
+
+class EmotionMoodReader:
+    """把 `EmotionJudge` 适配成 monitor 那条腿的形状（available / classify_array）。
+
+    下游（mood_fuse → 一分钟多数票 → 场景状态机）拿到的仍是 `MoodVerdict`，所以这里
+    只做两件事：把 state 递进去、把统一结构收回三态。`valence` / `arousal` /
+    `intention_hint` 原样留在 `last_verdict` 上供调试看——现有融合层不用它们，也不用改。
+    """
+
+    def __init__(self, judge: EmotionJudge) -> None:
+        self.judge = judge
+        # jev / llm 把这一拍的字幕一起看，比只喂一帧更准。
+        self.wants_text = True
+        self.last_verdict = None
+
+    @property
+    def name(self) -> str:
+        return str(getattr(self.judge, "name", "") or "")
+
+    @property
+    def available(self) -> bool:
+        try:
+            return bool(self.judge.available())
+        except Exception:      # noqa: BLE001 —— 问能不能用出岔子就是不能用
+            return False
+
+    def download_async(self, *args, **kwargs) -> bool:
+        """与 MoodCvReader 同形：这条腿没有本地权重可下。"""
+        return False
+
+    def classify_array(self, array, text: str | None = None) -> MoodVerdict | None:
+        """一帧（+ 这一拍的字幕）→ `MoodVerdict`。判不了返回 None，由调用方兜底。"""
+        state: dict[str, object] = {}
+        if array is not None:
+            state["image"] = array
+        if text:
+            state["text"] = str(text)
+        try:
+            verdict = self.judge.judge(state)
+        except Exception as exc:      # noqa: BLE001 —— 后端炸了这一拍当没判
+            logger.info("情绪后端 %s 这一拍没成（%s）", self.name or "?", exc)
+            return None
+        if verdict is None:
+            return None
+        self.last_verdict = verdict
+        scene = (
+            verdict.emotion_label
+            if verdict.emotion_label in (SCENE_HORROR, SCENE_ANGRY, SCENE_FESTIVE)
+            else None
+        )
+        score = float(verdict.confidence) if scene else 0.0
+        scores = {scene: score} if scene else {}
+        return MoodVerdict(scene, score, scores)
 
 
 class OcrReader:
@@ -574,7 +654,19 @@ class ScreenMonitor(QObject):
         self._apply_interval()
 
     def _build_mood(self):
-        """按 `screen.mood` 档位建那条腿。off 时返回 None（整条腿不参与）。"""
+        """按 `screen.mood` 档位建那条腿。off 时返回 None（整条腿不参与）。
+
+        `EMOTION_BACKEND=jev|llm` 显式指定时优先走可插拔后端；没配齐钥匙/地址就退回
+        下面原本的本地 / 云端逻辑，不报错、也不改变默认行为。
+        """
+        values = _emotion_env()
+        forced = _forced_backend(values)
+        if forced:
+            judge = EmotionJudge.from_config(self._config, env=values)
+            if not isinstance(judge, LocalBackend):
+                logger.info("画面情绪：按 EMOTION_BACKEND 启用 %s 后端", judge.name)
+                return EmotionMoodReader(judge)
+            logger.info("画面情绪：EMOTION_BACKEND=%s 没配齐（钥匙/地址），退回本地档", forced)
         mode = str(getattr(self._config.screen, "mood", "off") or "off").strip().lower()
         if mode == "off":
             return None
@@ -940,7 +1032,20 @@ class ScreenMonitor(QObject):
         """档位变了就把那条腿换掉（off / local / cloud 之间切）。
 
         同档位就不重建：改个判据阈值不该把 132MB 的会话再建一遍，就地改那一档的数。
+
+        显式指定 `EMOTION_BACKEND=jev|llm` 时以环境为准：已经挂着那条后端就不动，
+        没有被 `screen.mood` 档位换掉一说；其余情况与从前逐字相同。
         """
+        forced = _forced_backend(_emotion_env())
+        if forced:
+            if isinstance(self._mood, EmotionMoodReader) and self._mood.name == forced:
+                return
+            self._mood = self._build_mood()
+            return
+        if isinstance(self._mood, EmotionMoodReader):
+            # 环境里不再显式指定（或改成 local / 写错值）：退回档位逻辑
+            self._mood = self._build_mood()
+            return
         mode = str(getattr(self._config.screen, "mood", "off") or "off").strip().lower()
         if mode not in ("off", "local", "cloud"):
             mode = "off"
@@ -1240,10 +1345,18 @@ class ScreenMonitor(QObject):
         主要就是被这 4 秒拖着。
 
         返回 (字幕文字, 画面判读, OCR 跳没跳过)。第三条只用来写日志。
+
+        `EMOTION_BACKEND=jev|llm` 显式启用时，字幕也是判定输入，所以先把这一拍 OCR
+        出来再连同画面一起送进去；默认本地档仍走"画面腿先跑、定案就省 OCR"的原路。
         """
         verdict = None
-        if self._mood is not None and cv_array is not None:
-            verdict = self._mood.classify_array(cv_array)
+        mood = self._mood
+        if mood is not None and getattr(mood, "wants_text", False):
+            text = self._reader.read_array(array)
+            verdict = mood.classify_array(cv_array, text=text)
+            return text, verdict, False
+        if mood is not None and cv_array is not None:
+            verdict = mood.classify_array(cv_array)
             if verdict is not None and verdict.scene:
                 return "", verdict, True
         text = self._reader.read_array(array)
