@@ -117,6 +117,7 @@ OFFLINE = (
     "test_social_card_exists_peer.py",
     "test_social_emotion_backend.py",
     "test_social_emotion_wire.py",
+    "test_date_knowledge.py",
     "test_multimodal.py",
     "test_mood_fix.py",
     "test_mood_horror.py",
