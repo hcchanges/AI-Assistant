@@ -1,0 +1,9 @@
+# v2-cloud-service：只加服务层依赖，不动根 requirements.txt。
+# 不装这两行也能跑（service/api.py 自带标准库 HTTP 入口）；
+# 装了以后可用 uvicorn service.api:create_fastapi_app --factory。
+fastapi>=0.110
+uvicorn[standard]>=0.27
+
+# 推理依赖在后续批次各自追加：
+#   v2-pose-local：mediapipe / onnxruntime（按本机实时性选型后写死）
+#   v2-asr-local：faster-whisper / ctranslate2（按本机实时性选型后写死）
