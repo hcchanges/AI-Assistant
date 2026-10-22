@@ -123,6 +123,7 @@ OFFLINE = (
     "test_date_asr.py",
     "test_date_pipe.py",
     "test_date_glass.py",
+    "test_date_writeback.py",
     "test_multimodal.py",
     "test_mood_fix.py",
     "test_mood_horror.py",
