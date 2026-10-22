@@ -119,6 +119,7 @@ OFFLINE = (
     "test_social_emotion_wire.py",
     "test_date_knowledge.py",
     "test_cloud_service.py",
+    "test_date_pose.py",
     "test_multimodal.py",
     "test_mood_fix.py",
     "test_mood_horror.py",
