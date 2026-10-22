@@ -121,6 +121,7 @@ OFFLINE = (
     "test_cloud_service.py",
     "test_date_pose.py",
     "test_date_asr.py",
+    "test_date_pipe.py",
     "test_multimodal.py",
     "test_mood_fix.py",
     "test_mood_horror.py",
