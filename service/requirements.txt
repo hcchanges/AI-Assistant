@@ -7,4 +7,5 @@ uvicorn[standard]>=0.27
 # 推理依赖在后续批次各自追加（都可选：不装 = 该特征自动降级，不影响服务启动）：
 # 姿态（v2-pose-local，可选）：不装也能跑，姿态层自动降级为“没看见人”
 mediapipe>=0.10.14
-#   v2-asr-local：faster-whisper / ctranslate2（④批选型后写死）
+# 语音识别（v2-asr-local，可选）：不装 = 语音层“没认到字”
+faster-whisper>=1.0
