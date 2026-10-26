@@ -47,6 +47,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Callable, Mapping
 
+from core.paths import app_path
 from life.screen.scenes import SCENE_ANGRY, SCENE_FESTIVE, SCENE_HORROR
 
 logger = logging.getLogger(__name__)
@@ -178,8 +179,8 @@ _DOTENV_NAME = ".env"
 
 
 def dotenv_path() -> Path:
-    """项目根下的 `.env`。"""
-    return Path(__file__).resolve().parents[2] / _DOTENV_NAME
+    """`.env` 的落点：开发态项目根，打包态 exe 旁边（用户看得见、改得到）。"""
+    return app_path(_DOTENV_NAME)
 
 
 def load_env() -> dict[str, str]:

@@ -15,10 +15,12 @@ import logging
 from dataclasses import dataclass
 from pathlib import Path
 
+from core.paths import bundle_dir
+
 logger = logging.getLogger(__name__)
 
 # 角色卡存放目录
-PERSONA_DIR = Path(__file__).resolve().parent / "personas"
+PERSONA_DIR = bundle_dir() / "life" / "psych" / "personas"
 
 # 索引文件：列出这个模块有哪些卡
 INDEX_FILE = "index.json"

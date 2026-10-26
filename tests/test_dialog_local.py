@@ -20,6 +20,7 @@
 
 from __future__ import annotations
 
+import re
 import sqlite3
 import sys
 from pathlib import Path
@@ -301,11 +302,43 @@ def main() -> int:
             ["git", "ls-files", "data/models"], capture_output=True, text=True, encoding="utf-8", errors="replace"
         ).stdout.strip()
         check("仓库里没有任何模型权重", tracked == "", tracked or "（空）")
-        req_diff = subprocess.run(
-            ["git", "diff", "HEAD", "--stat", "--", "requirements.txt"],
-            capture_output=True, text=True, encoding="utf-8", errors="replace",
-        ).stdout.strip()
-        check("requirements.txt 一个字没动（零新依赖）", req_diff == "", req_diff or "（无 diff）")
+        def _requirement_names(text: str) -> set[str]:
+            """只取依赖包名，忽略版本号 / extras / 环境标记 / 注释。
+
+            红线是「不新增依赖」，不是「文件一个字节都不许动」；放宽版本约束
+            时包名集合不变即可，否则每次修版本号都得改这条测试。
+            """
+            names: set[str] = set()
+            for raw in text.splitlines():
+                line = raw.split("#", 1)[0].strip()
+                if not line or line.startswith("-"):
+                    continue
+                token = line.split(";", 1)[0].strip()
+                token = re.split(r"[<>=!~@\s\[]", token, maxsplit=1)[0].strip()
+                if token and not token.startswith(("http://", "https://")):
+                    names.add(token.lower().replace("_", "-").replace(".", "-"))
+            return names
+
+        repo_root = Path(__file__).resolve().parent.parent
+        base_req = subprocess.run(
+            ["git", "show", "HEAD:requirements.txt"],
+            cwd=repo_root, capture_output=True, text=True,
+            encoding="utf-8", errors="replace",
+        ).stdout
+        cur_req = (repo_root / "requirements.txt").read_text(
+            encoding="utf-8", errors="replace"
+        )
+        base_names = _requirement_names(base_req)
+        cur_names = _requirement_names(cur_req)
+        req_diff = (
+            f"新增 {sorted(cur_names - base_names)} / "
+            f"删除 {sorted(base_names - cur_names)}"
+        )
+        check(
+            "依赖包名集合未变（允许版本约束变动）",
+            base_names == cur_names,
+            req_diff,
+        )
 
         check(
             "解析链是本地优先（有模型先本地，抛 LocalUnavailable 才回落）",

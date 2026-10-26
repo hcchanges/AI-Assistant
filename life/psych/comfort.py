@@ -19,10 +19,12 @@ import random
 from dataclasses import dataclass
 from pathlib import Path
 
+from core.paths import bundle_dir
+
 logger = logging.getLogger(__name__)
 
 # 语料库文件：跟别的语料一样放在 data/ 下，改语气只改这个 JSON
-LIBRARY_PATH = Path(__file__).resolve().parents[2] / "data" / "comfort_library.json"
+LIBRARY_PATH = bundle_dir() / "data" / "comfort_library.json"
 
 LIGHT = "light"
 MEDIUM = "medium"

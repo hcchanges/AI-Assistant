@@ -23,14 +23,17 @@ from typing import Any
 import keyring
 import yaml
 
+from core.paths import app_path, bundle_dir
+
 logger = logging.getLogger(__name__)
 
 # 保存时用的哨兵："加载时那份里没有这一项"（区别于"这一项是空的"）
 _MISSING = object()
 
-# 项目根目录（core/ 的上一级）
-ROOT_DIR = Path(__file__).resolve().parent.parent
-DEFAULT_CONFIG_PATH = ROOT_DIR / "config.yaml"
+# 运行时资源根：开发态是项目根，打包态是 PyInstaller 的 _MEIPASS。
+ROOT_DIR = bundle_dir()
+# 用户可编辑的配置放在 exe 旁边（开发态就是项目根）。
+DEFAULT_CONFIG_PATH = app_path("config.yaml")
 
 # 支持的模型接入协议，目前只做 OpenAI 兼容协议（DeepSeek/通义等均兼容）
 SUPPORTED_PROTOCOLS = ("openai_compatible",)

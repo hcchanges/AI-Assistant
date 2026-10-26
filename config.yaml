@@ -21,15 +21,15 @@ llm:
       model: qwen-plus
       api_key_ref: llm_dashscope
 pet:
-  name: 团子
-  persona: 傲娇
+  name: 桌宠
+  persona: 软萌黏人
   persona_prompt: ''
-  user_call: ''
+  user_call: 你
   style_actions: true
   style_kaomoji: false
   position:
-  - 1403
-  - 859
+  - 1400
+  - 700
   hover_hint: true
   hover_hint_sec: 0.5
 memory:

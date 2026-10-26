@@ -32,3 +32,7 @@ flowcharts/
 # 系统
 .DS_Store
 Thumbs.db
+# ===== 打包产物（勿入库；源码分发只需要源码与资源）=====
+dist/
+build/
+*.spec

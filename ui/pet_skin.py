@@ -33,6 +33,7 @@ import numpy as np
 from PySide6.QtCore import QRect, Qt
 from PySide6.QtGui import QImage, QPainter, QPixmap
 
+from core.paths import bundle_dir, scene_skin_dir
 from life.screen.scene_guard import KIND_FOCUS, KIND_WATCH
 from life.screen.scenes import SCENE_ANGRY, SCENE_FESTIVE, SCENE_HORROR
 from pet.behavior import Behavior
@@ -42,7 +43,7 @@ logger = logging.getLogger(__name__)
 
 CANVAS = 160                      # 桌宠窗口边长（逻辑像素）
 PIXEL_RATIO = 2.0                 # 高分屏按 2 倍输出，缩放后不糊
-ASSETS_DIR = Path(__file__).resolve().parent.parent / "pet" / "assets"
+ASSETS_DIR = bundle_dir() / "pet" / "assets"
 
 # 姿势名（与 pet/assets/ 下的文件名一致）
 POSE_IDLE = "sit_happy"
@@ -55,9 +56,9 @@ ALL_POSES = (POSE_IDLE, POSE_IDLE_ALT, POSE_TALK, POSE_SLEEP, POSE_DRAG)
 
 # ---- 国风神兽整图换皮（v2-skin-guofeng） ----
 # 场景态 + 情绪 → 一张整图 png（用户已抠净透明底，运行期按 alpha 裁边，非姿态帧动画）。
-# 图按固定路径从数据根读（跟 tools/prepare_pet_skin.py 的 SOURCE_DIR 同一个位置），
-# 不新增 config 项。四张图只作资源，不进任何库。
-SCENE_SKIN_DIR = Path(__file__).resolve().parent.parent.parent   # E:\电子宠物
+# 图随仓库走（pet/assets/scenes），源码运行和打包态都用同一套路径；缺图只降级，
+# 不让整只宠物消失。四张图只作资源，不进任何库。
+SCENE_SKIN_DIR = scene_skin_dir()   # 开发态 <repo>/pet/assets/scenes；打包态 _MEIPASS/pet/assets/scenes
 
 SKIN_FOCUS_WORK = "国风神兽-认真工作.png"   # 专注 → 认真工作
 SKIN_ANGRY = "国风神兽-叉腰愤怒.png"         # 电影·愤怒

@@ -29,6 +29,7 @@ import re
 from dataclasses import dataclass
 from pathlib import Path
 
+from core.paths import bundle_dir
 from pet.persona import persona_style_layer
 
 logger = logging.getLogger(__name__)
@@ -86,7 +87,7 @@ CHAT_STAGES: tuple[str, ...] = ("陌生", "熟悉")
 
 #: 范本文件的落点。跟着仓库走（`pet/assets/范本/`），**不挂用户目录**——它是产品的一部分，
 #: 不是用户数据，换台机器跑同一份代码就该有同一套范本。
-FEW_SHOT_DIR = Path(__file__).resolve().parents[2] / "pet" / "assets" / "范本"
+FEW_SHOT_DIR = bundle_dir() / "pet" / "assets" / "范本"
 FEW_SHOT_FILE = FEW_SHOT_DIR / "闲聊选段.md"
 
 _STAGE_RE = re.compile(r"^\[(?P<stage>[^\]]+)\]$")

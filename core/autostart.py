@@ -22,7 +22,12 @@ VALUE_NAME = "Desktoppet"
 
 
 def _launch_command() -> str:
-    """返回开机要执行的命令行，优先用 pythonw.exe 以不弹控制台窗口。"""
+    """返回开机要执行的命令行，优先用 pythonw.exe 以不弹控制台窗口。
+
+    打包态没有 main.py 可指，直接拉起 exe 自己。
+    """
+    if getattr(sys, "frozen", False):
+        return f'"{Path(sys.executable).resolve()}"'
     python_dir = Path(sys.executable).parent
     pythonw = python_dir / "pythonw.exe"
     exe = pythonw if pythonw.exists() else Path(sys.executable)

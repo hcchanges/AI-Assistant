@@ -1,7 +1,44 @@
 @echo off
-rem Launcher for the desktop pet. It runs main.py with a renamed copy of the
-rem interpreter, so Task Manager shows the process as the pet's own name.
+setlocal EnableExtensions
 cd /d "%~dp0"
-start "" "%~dp0.venv\Scripts\æ¡Œé¢å® ç‰©.exe" "%~dp0main.py"
-rem å¯åŠ¨æ¡Œé¢å® ç‰©ï¼šç”¨æ”¹ååçš„è§£é‡Šå™¨å‰¯æœ¬ .venv\Scripts\æ¡Œé¢å® ç‰©.exe è·‘ main.pyã€‚
-rem ä¸­æ–‡æ³¨é‡Šå¿…é¡»æ”¾åœ¨æœ€åä¸€è¡Œâ€”â€”cmd åœ¨ UTF-8 ä»£ç é¡µä¸‹è§£æå¤šå­—èŠ‚å­—ç¬¦ä¼šé”™ä½ï¼Œæ³¨é‡Šè‹¥åœ¨å‰é¢ä¼šæŠŠå‘½ä»¤æ‹†åã€‚
+
+set "VENV_ACTIVATE=%~dp0.venv\Scripts\activate.bat"
+if exist "%VENV_ACTIVATE%" (
+    call "%VENV_ACTIVATE%"
+    echo ÒÑÆôÓÃÏîÄ¿ .venv
+) else (
+    echo Î´ÕÒµ½ÏîÄ¿ .venv£¬¸ÄÓÃÏµÍ³ PATH ÀïµÄ Python
+)
+
+python --version >nul 2>&1
+if errorlevel 1 (
+    echo Î´¼ì²âµ½ Python£¬Çë°²×° Python 3.12 ²¢¹´Ñ¡ Add to PATH
+    if /I not "%PET_NO_PAUSE%"=="1" pause
+    exit /b 1
+)
+
+if not exist "%~dp0.env" (
+    if exist "%~dp0.env.example" (
+        copy /y "%~dp0.env.example" "%~dp0.env" >nul
+        echo ÒÑÉú³É .env£¬ÈçĞèÍêÕû AI ¹¦ÄÜÇëÌî API Key
+    )
+)
+
+echo ÕıÔÚ¼ì²é / °²×°ÒÀÀµ£¨ÒÑ×°»á×Ô¶¯Ìø¹ı£©...
+python -m pip install -r "%~dp0requirements.txt" -i https://pypi.tuna.tsinghua.edu.cn/simple
+if errorlevel 1 (
+    echo Çå»ª¾µÏñ°²×°Ê§°Ü£¬¸ÄÓÃ¹Ù·½ PyPI ÖØÊÔ...
+    python -m pip install -r "%~dp0requirements.txt"
+)
+if errorlevel 1 (
+    echo ÒÀÀµ°²×°Ê§°Ü£¬Çë¼ì²éÍøÂçºóÖØĞÂË«»÷±¾ÎÄ¼ş
+    if /I not "%PET_NO_PAUSE%"=="1" pause
+    exit /b 1
+)
+
+echo ÕıÔÚÆô¶¯×À³è...
+python "%~dp0main.py"
+set "EXIT_CODE=%ERRORLEVEL%"
+if not "%EXIT_CODE%"=="0" echo ×À³èÒÑÍË³ö£¬ÍË³öÂë %EXIT_CODE%
+if /I not "%PET_NO_PAUSE%"=="1" pause
+exit /b %EXIT_CODE%

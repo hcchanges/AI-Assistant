@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import logging
+import sys
 from logging.handlers import RotatingFileHandler
 from pathlib import Path
 
@@ -11,7 +12,10 @@ _FORMAT = "%(asctime)s [%(levelname)s] %(name)s: %(message)s"
 
 def setup_logging(level: str = "INFO", log_dir: Path | None = None) -> None:
     """配置根日志器。log_dir 为 None 时只输出到控制台。"""
-    handlers: list[logging.Handler] = [logging.StreamHandler()]
+    # --noconsole 打包后 sys.stderr 是 None，再挂 StreamHandler 会在每条日志上炸。
+    handlers: list[logging.Handler] = []
+    if sys.stderr is not None:
+        handlers.append(logging.StreamHandler())
     if log_dir is not None:
         log_dir.mkdir(parents=True, exist_ok=True)
         file_handler = RotatingFileHandler(
