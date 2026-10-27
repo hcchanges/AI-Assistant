@@ -80,7 +80,7 @@ def main() -> int:
     life_src = _src("ui/panels/life_panel.py")
     check("生活卡构造时显式打开 X", "closable=True" in life_src, "")
     work_src = _src("ui/panels/work_panel.py")
-    check("工作模块那一页一个 closable 都没带（公开版它是块锁着的占位页）",
+    check("部门卡那张轮播一个 closable 都没带（工作模块没被牵动）",
           "closable" not in work_src, "")
 
     view = _carousel([1, 2], [True, True])

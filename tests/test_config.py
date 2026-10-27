@@ -108,7 +108,7 @@ def main() -> int:
         check("用户改的 model 读进来了", config.llm.provider("deepseek").model == "deepseek-flash", config.llm.provider("deepseek").model)
         check("用户加的 provider 读进来了", "deepseek_pro" in config.llm.providers, str(list(config.llm.providers)))
         check("work 段读进来了", config.work.pet_comment is True and config.work.top_n == 5, str(config.work))
-        check("身份（调试用）缺省就是管理员", config.work.role == "admin", config.work.role)
+        check("身份缺省就是员工（未登录管理者）", config.work.role == "user", config.work.role)
         check("温度读的是用户值 0.5", config.llm.temperature == 0.5, str(config.llm.temperature))
         check(
             "card 的品类词表读进来了",

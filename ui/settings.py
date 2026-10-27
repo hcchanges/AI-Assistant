@@ -65,6 +65,7 @@ from memory.store import MemoryStore
 from monitor.category import CATEGORIES, builtin_category, friendly_name
 from pet.persona import CUSTOM_KEY, PERSONA_KEYS, USER_CALL_CHOICES, preset_of
 from scheduler.jobs import ReminderJobs
+from work.service import DEFAULT_ADMIN_PASS, DEFAULT_ADMIN_USER
 from ui.panels.container import fit_dialog_on_screen
 from ui.theme import ACCENT, PANEL_QSS, TEXT_MUTED
 
@@ -121,10 +122,16 @@ class SettingsDialog(QDialog):
         memory_book: Any = None,
         reset: Any = None,
         parent: QWidget | None = None,
+        work_service: Any = None,
+        work_panel: Any = None,
     ):
         super().__init__(parent, Qt.Window)
         self._config = config
         self._bus = bus
+        # 管理者登录用：登录 / 退出要立刻作用到工作模块。测试或不带工作模块构造时
+        # 允许不传（此时只改配置，不碰界面）。
+        self._work_service = work_service
+        self._work_panel = work_panel
         self._pet_profile_dao = pet_profile_dao
         self._activity_dao = activity_dao
         self._category_dao = category_dao
@@ -751,35 +758,104 @@ class SettingsDialog(QDialog):
             self._mood_cloud_check.setChecked(False)
 
     def _build_work_tab(self) -> QWidget:
-        """工作页：身份切换（调试用）+ 宠物点评开关。
+        """工作页：管理者登录 + 宠物点评开关。
 
-        真正的账号体系还没做，管理员 / 员工先靠这一档切：切完重新打开工作模块，
-        员工看不到「编辑底层连接」，自建卡的新建 / 编辑 / 删除两边都能用。
-        点评开关原来的位置在工作页右上角（勾选框），指令 23 第 3 项挪到这里，默认关。
+        阶段一：登录只比对 work.service 里的固定常量，不接 User.password_hash，
+        也没有会话 / 令牌。登录成功把 config.work.role 写成 admin，并复用现有
+        WorkService.set_role / WorkPanel.apply_role 链路；退出则写回 user。
+        点评开关仍在原处，默认关。
         """
         page = QWidget(self)
         form = QFormLayout(page)
 
-        self._role_combo = QComboBox(page)
-        self._role_combo.addItem("管理员", WORK_ROLE_ADMIN)
-        self._role_combo.addItem("员工", WORK_ROLE_USER)
-        form.addRow("身份切换（调试用）", self._role_combo)
+        # 未登录时显示账号 / 密码 / 登录按钮；已是管理者时整块换成状态 + 退出按钮。
+        self._admin_login_box = QWidget(page)
+        login_form = QFormLayout(self._admin_login_box)
+        login_form.setContentsMargins(0, 0, 0, 0)
+
+        self._admin_user_edit = QLineEdit(self._admin_login_box)
+        self._admin_user_edit.setPlaceholderText("管理者账号")
+        login_form.addRow("管理者账号", self._admin_user_edit)
+
+        self._admin_pass_edit = QLineEdit(self._admin_login_box)
+        self._admin_pass_edit.setEchoMode(QLineEdit.Password)
+        self._admin_pass_edit.setPlaceholderText("管理者密码")
+        login_form.addRow("管理者密码", self._admin_pass_edit)
+
+        self._admin_login_button = QPushButton("登录管理者", self._admin_login_box)
+        self._admin_login_button.clicked.connect(self._login_admin)
+        login_form.addRow("", self._admin_login_button)
+        form.addRow("", self._admin_login_box)
+
+        self._admin_box = QWidget(page)
+        admin_layout = QHBoxLayout(self._admin_box)
+        admin_layout.setContentsMargins(0, 0, 0, 0)
+        self._admin_status = QLabel("已处于管理者模式", self._admin_box)
+        self._admin_status.setObjectName("MutedLabel")
+        admin_layout.addWidget(self._admin_status)
+        self._admin_logout_button = QPushButton("退出管理者", self._admin_box)
+        self._admin_logout_button.clicked.connect(self._logout_admin)
+        admin_layout.addWidget(self._admin_logout_button)
+        admin_layout.addStretch(1)
+        form.addRow("", self._admin_box)
 
         self._comment_check = QCheckBox("宠物点评工作结果", page)
         self._comment_check.setToolTip(
-            "打开后，工作模块里出的结果末尾会带一句宠物自己的看法；关掉就只出报告"
+            "打开后，BOM 物料优化与爆品卖点的结果末尾会带一句宠物自己的看法；关掉就只出报告"
         )
         form.addRow("结果末尾带点评", self._comment_check)
 
         note = QLabel(
-            "身份切换只影响工作模块：选「员工」后，工作模块里看不到「编辑底层连接」（底层流程不对员工开放）。\n"
-            "切换后重新打开工作模块生效；身份与点评开关都存进配置，重启保持。点评默认关。",
+            "管理者登录后，工作模块会解锁「编辑底层连接」；退出后回到员工视角。\n"
+            "登录状态存进配置，重启保持。账号密码是本地固定值。点评默认关。",
             page,
         )
         note.setObjectName("MutedLabel")
         note.setWordWrap(True)
         form.addRow("", note)
+        self._sync_admin_ui()
         return page
+
+    def _sync_admin_ui(self) -> None:
+        """按当前配置切换「登录块 / 已登录块」。"""
+        is_admin = self._config.work.role == WORK_ROLE_ADMIN
+        self._admin_login_box.setVisible(not is_admin)
+        self._admin_box.setVisible(is_admin)
+
+    def _set_work_role(self, role: str) -> bool:
+        """写配置并立刻作用到工作模块；写盘失败就退回原身份。"""
+        previous = self._config.work.role
+        self._config.work.role = role
+        try:
+            self._config.save()
+        except OSError as exc:
+            self._config.work.role = previous
+            self._status.setText(f"写入配置文件失败：{exc}")
+            return False
+        if self._work_service is not None:
+            self._work_service.set_role(role)
+        if self._work_panel is not None:
+            self._work_panel.apply_role()
+        return True
+
+    def _login_admin(self) -> None:
+        user = self._admin_user_edit.text().strip()
+        password = self._admin_pass_edit.text()
+        if user != DEFAULT_ADMIN_USER or password != DEFAULT_ADMIN_PASS:
+            self._status.setText("账号或密码错误")
+            return
+        if not self._set_work_role(WORK_ROLE_ADMIN):
+            return
+        self._admin_pass_edit.clear()
+        self._sync_admin_ui()
+        self._status.setText("已登录管理者模式，工作模块已解锁")
+
+    def _logout_admin(self) -> None:
+        if not self._set_work_role(WORK_ROLE_USER):
+            return
+        self._admin_pass_edit.clear()
+        self._sync_admin_ui()
+        self._status.setText("已退出管理者模式")
 
     def _build_notes_tab(self) -> QWidget:
         """笔记页（v2-notes-path）：抓屏笔记开不开、隔多久抓、笔记存哪儿。
@@ -1108,8 +1184,8 @@ class SettingsDialog(QDialog):
         self._auto_focus_spin.setValue(scr.focus_minutes)
         self._focus_words_edit.setText("，".join(scr.focus_words))
 
-        # 工作页：身份切换（调试用）与点评开关
-        self._role_combo.setCurrentIndex(self._role_combo.findData(self._config.work.role))
+        # 工作页：管理者登录状态与点评开关
+        self._sync_admin_ui()
         self._comment_check.setChecked(self._config.work.pet_comment)
 
         # 笔记页（v2-notes-path）：开关 / 间隔 / 落点
@@ -1357,7 +1433,7 @@ class SettingsDialog(QDialog):
         scr.mood_min_score = self._mood_min_spin.value()
         scr.mood_cloud = scr.mood == "cloud" and self._mood_cloud_check.isChecked()
 
-        self._config.work.role = self._role_combo.currentData()      # 身份切换（调试用）
+        # 工作身份只由「管理者登录 / 退出」写（登录时已即时落盘），这里不再覆盖。
         self._config.work.pet_comment = self._comment_check.isChecked()   # 结果末尾带宠物点评
 
         # 笔记（v2-notes-path）：开关 / 间隔 / 落点。路径填了但用不了**不拦保存**，

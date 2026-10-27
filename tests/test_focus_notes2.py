@@ -30,9 +30,7 @@ from PySide6.QtWidgets import QPushButton
 
 from life.screen.notes import BATCH_SIZE
 
-# 公开版：菜单里工作模块那一项写的是锁着的说法（ui/pet_window.py / ui/tray.py）
-LOCKED_WORK = "🔒 工作模块（待解锁）"
-FOUR = [LOCKED_WORK, "生活", "设置", "退出"]
+FOUR = ["工作", "生活", "设置", "退出"]
 FOCUS_ITEMS = ("开始专注", "结束专注", "番茄钟", "继续")
 
 

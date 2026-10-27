@@ -906,7 +906,7 @@ class DesktopPetApp:
             on_stop=self._stop_playmate,
         )
         # 卡内小助手（v2-card-tools-A）：生活卡与工作卡底下那个小窗共用一个服务，
-        # 会话与记录按**卡号**分开（`life:12` / `work:feature_a`），所以一个服务
+        # 会话与记录按**卡号**分开（`life:12` / `work:bom_optimize`），所以一个服务
         # 伺候两边也不会串。
         #
         # 把"现在这个身份"接进去（v2-card-tools-D）：卡上能长出什么部件要看身份
@@ -1835,6 +1835,8 @@ class DesktopPetApp:
             memory_book=self.mind_memory_book,
             reset=self.memory_reset,
             parent=self.panel,
+            work_service=self.work_service,
+            work_panel=self.work_panel,
         )
         dialog.saved.connect(self._on_settings_saved)
         dialog.exec()

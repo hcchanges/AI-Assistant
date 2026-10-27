@@ -226,6 +226,18 @@ _NON_VIDEO_PROCS = frozenset({
     # 系统外壳窗口（UWP 宿主 / 开始菜单 / 锁屏）——它们也是无边框铺满的常客
     "applicationframehost.exe", "startmenuexperiencehost.exe",
     "shellexperiencehost.exe", "lockapp.exe",
+    # ---- 微信自己的内置宿主（v2-wechat-host-not-game）----
+    # 微信登录 / 小程序 / 视频号那些界面不是 Weixin.exe 自己画的，跑在插件宿主里
+    # （本机实测 `...\Tencent\xwechat\xplugin\plugins\RadiumWMPF\WeChatAppEx.exe`，
+    # 旧版微信还有一份同名的）。这些窗口天生无边框（webview 自绘标题栏），会撞上
+    # `recognize()` 最后那条"无边框全屏"线索被认成游戏，于是微信一登录就冒
+    # 「我陪你一起玩游戏啦」——真机 2026-10-16 00:48:13 日志原文：
+    # `游戏态认出来了（WeChatAppEx）`。它们**一定不是游戏**，跟桌面 / 截图工具一样
+    # 放进这道硬闸即可；游戏识别那五条线索的顺序一个字不动。
+    "wechatappex.exe",              # 微信小程序 / 登录 webview 宿主（新旧版本同名）
+    # 提示浮层宿主：真机 2026-10-26 22:23:45 同一个误判（`场景态：game`），前后脚
+    # 出现在微信窗口旁边。名字只可能指这一个软件，收进来不误伤任何游戏。
+    "leaswptip.exe",
 })
 
 

@@ -38,9 +38,6 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 
-# 公开版：菜单里工作模块那一项写的是锁着的说法（ui/pet_window.py / ui/tray.py）
-LOCKED_WORK = "🔒 工作模块（待解锁）"
-
 from harness import check, drain_threads, make_env, pump, section, summary, wait_for
 
 from PySide6.QtCore import QEvent, QPointF, Qt
@@ -360,7 +357,7 @@ def main() -> int:
           _no_focus_items(pet_texts), str(pet_texts))
     # v2-chat-core #1 把「语音输入（按住说话）」从两条菜单里摘了，所以这条不再要求它。
     check("空闲态：菜单正好四条（工作/生活/设置/退出），一条不多一条不少",
-          pet_texts == [LOCKED_WORK, "生活", "设置", "退出"], str(pet_texts))
+          pet_texts == ["工作", "生活", "设置", "退出"], str(pet_texts))
     check("空闲态：没留下连着两条分隔符的空档（条件渲染最容易在这儿露馅）",
           _no_double_sep(pet_rows), str(pet_rows))
     tray_rows = _menu_rows(app.tray._menu)
@@ -371,10 +368,10 @@ def main() -> int:
     focus_on()
     busy_texts = _pet_menu(pet)
     check("专注态：菜单**还是**那四条，不因为「在专注」就多冒两条（v2-focus-notes2 ③）",
-          busy_texts == [LOCKED_WORK, "生活", "设置", "退出"], str(busy_texts))
+          busy_texts == ["工作", "生活", "设置", "退出"], str(busy_texts))
     busy_tray = _tray_menu(app)
     check("托盘同款：专注时也只有 显示/隐藏 + 四条",
-          [t for t in busy_tray if t] == ["隐藏桌宠", LOCKED_WORK, "生活", "设置", "退出"],
+          [t for t in busy_tray if t] == ["隐藏桌宠", "工作", "生活", "设置", "退出"],
           str(busy_tray))
 
     # 切走 → **这一轮就结束了**（v2-focus-notes2 ①）。原先这里是"暂停、两条仍要在"，
@@ -387,7 +384,7 @@ def main() -> int:
     check("切走 → 不再有「暂停态」：回空闲、进度清零、菜单照旧四条",
           (not focus.running) and (not focus.in_progress)
           and focus.remaining == focus.planned
-          and left_texts == [LOCKED_WORK, "生活", "设置", "退出"],
+          and left_texts == ["工作", "生活", "设置", "退出"],
           f"running={focus.running} in_progress={focus.in_progress} "
           f"remaining={focus.remaining}/{focus.planned} 切走时={kept}")
 

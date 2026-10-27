@@ -45,9 +45,8 @@ class PetTray(QSystemTrayIcon):
         )
         self._toggle_action.triggered.connect(lambda: self.action_requested.emit("toggle"))
         self._menu.addSeparator()
-        # 跟桌宠右键菜单同款：工作模块那一项写锁着的说法（公开版）
         for key, text in (
-            ("work", "🔒 工作模块（待解锁）"),
+            ("work", "工作"),
             ("life", "生活"),
             ("settings", "设置"),
         ):

@@ -110,7 +110,7 @@ class CarouselChild:
     职能卡只是预览，点部门卡任意位置都进概览（指令 20 ⑥），不再直接点开某一张。
     """
 
-    key: object             # 子卡 key（如 "feature_a"）；空卡位是 None
+    key: object             # 职能卡 key（如 bom_optimize）；空卡位是 None
     title: str
     subtitle: str = ""
     empty: bool = False

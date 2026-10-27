@@ -11,7 +11,7 @@ import logging
 import sys
 from logging.handlers import RotatingFileHandler
 
-from core.paths import bundle_dir, ensure_app_file
+from core.paths import app_dir, ensure_app_file
 
 _LAUNCH_LOGGER = "launch"
 
@@ -20,10 +20,11 @@ def _setup_launch_log() -> logging.Logger | None:
     """把启动过程单独落一份 data/logs/launch.log。
 
     `--noconsole` 打包后没有控制台，导入/启动阶段的异常只能靠文件查。落点跟
-    pet.log 同一个 data/logs：开发态是项目内 data/logs，打包态是 _internal/data/logs。
+    pet.log 同一个 data/logs：开发态是项目内 data/logs，打包态是 **exe 旁**的
+    data/logs（不再是藏进 _internal 的那一份）。
     写不进去不拦启动，返回 None，调用方逐处判空。
     """
-    path = bundle_dir() / "data" / "logs" / "launch.log"
+    path = app_dir() / "data" / "logs" / "launch.log"
     try:
         path.parent.mkdir(parents=True, exist_ok=True)
         handler = RotatingFileHandler(

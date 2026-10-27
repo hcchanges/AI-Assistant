@@ -329,9 +329,11 @@ def main() -> int:
             app.screen_monitor.foreground_changed.emit("explorer.exe")   # 走开
             pump(0.05)
             check("走开这一拍就记上了'没人看着'", app._card_away is True, "")
-            pump(0.6)
+            # 到点清 + 淡出收窗都得真走完。满载时 0.3 秒的表 + 180ms 淡出，硬 pump(0.6)
+            # 余量太薄（全量回归偶发"卡片已清、窗还在淡出"），改成等条件、最多 2 秒。
+            ok = wait_for(lambda: _cards(bubble) == [] and not bubble.isVisible(), 2.0)
             check("★ 乙-5 这几种离开判定最后都能走到'到点就清 + 收窗'",
-                  _cards(bubble) == [] and bubble.isVisible() is False,
+                  ok,
                   f"{len(_cards(bubble))} 条 / visible={bubble.isVisible()}")
         finally:
             bootstrap_mod.CARD_CLEAR_S = shortened

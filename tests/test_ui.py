@@ -24,13 +24,11 @@ from core.config import Config
 from life.mind.intimacy import MindIntimacy
 from life.mind.memory_book import MemoryBook
 from life.mind.store import MindStore
+from work.service import DEFAULT_ADMIN_PASS, DEFAULT_ADMIN_USER
 import ui.settings as settings_mod
 import ui.theme as theme_mod
 from pet.persona import PERSONA_KEYS
 from ui.pet_window import HOVER_HINT_LINE, ZZZ_TEXT
-
-# 公开版：菜单里工作模块那一项写的是锁着的说法（ui/pet_window.py / ui/tray.py）
-LOCKED_WORK = "🔒 工作模块（待解锁）"
 
 
 def menu_texts(menu) -> list[str]:
@@ -75,13 +73,13 @@ def main() -> int:
     check(
         "桌宠右键（空闲态）是 工作/生活/设置/退出（和谁聊、语音输入已删）",
         menu_texts(app.pet_window._build_menu())
-        == [LOCKED_WORK, "生活", "设置", "退出"],
+        == ["工作", "生活", "设置", "退出"],
         str(menu_texts(app.pet_window._build_menu())),
     )
     check(
         "托盘菜单（空闲态）是 显示/隐藏 + 四项，跟桌宠右键同一套",
         menu_texts(app.tray.contextMenu())
-        == ["隐藏桌宠", LOCKED_WORK, "生活", "设置", "退出"],
+        == ["隐藏桌宠", "工作", "生活", "设置", "退出"],
         str(menu_texts(app.tray.contextMenu())),
     )
     app.tray.set_pet_visible(False)
@@ -181,6 +179,8 @@ def main() -> int:
         jobs=app.jobs,
         user_id=app.user.id,
         parent=panel,
+        work_service=app.work_service,
+        work_panel=app.work_panel,
     )
     tabs = dialog.findChild(QTabWidget)
     names = [tabs.tabText(index) for index in range(tabs.count())]
@@ -231,13 +231,43 @@ def main() -> int:
     check("回填了看图模型名", dialog._vision_model_edit.text() == app.config.vision.model, dialog._vision_model_edit.text())
     check("回填了截屏间隔", dialog._vision_sample_spin.value() == app.config.vision.sample_sec)
     check(
-        "身份切换（调试用）回填成配置里那档",
-        dialog._role_combo.currentData() == app.config.work.role
-        and [dialog._role_combo.itemText(i) for i in range(dialog._role_combo.count())] == ["管理员", "员工"],
-        f"{dialog._role_combo.currentText()} / {dialog._role_combo.currentData()}",
+        "管理者模式显示「已处于管理者模式」与退出按钮",
+        not dialog._admin_box.isHidden()
+        and dialog._admin_login_box.isHidden()
+        and dialog._admin_logout_button.text() == "退出管理者",
+        f"admin_box_hidden={dialog._admin_box.isHidden()} login_box_hidden={dialog._admin_login_box.isHidden()}",
     )
-    dialog._role_combo.setCurrentIndex(1)      # 选「员工」
-    check("选员工写回配置", dialog._role_combo.currentData() == "user", dialog._role_combo.currentData())
+
+    dialog._logout_admin()
+    check("退出管理者写回配置", app.config.work.role == "user", app.config.work.role)
+    check("退出后工作服务不再是管理员", not app.work_service.is_admin(), str(app.work_service.is_admin()))
+    check("退出后工作页没有底层编辑按钮", app.work_panel._admin_button is None, "")
+    check(
+        "退出后显示登录框",
+        not dialog._admin_login_box.isHidden() and dialog._admin_box.isHidden(),
+        f"login_box_hidden={dialog._admin_login_box.isHidden()} admin_box_hidden={dialog._admin_box.isHidden()}",
+    )
+
+    dialog._admin_user_edit.setText("wrong")
+    dialog._admin_pass_edit.setText("wrong")
+    dialog._login_admin()
+    check("错误账号密码不改变身份", app.config.work.role == "user", app.config.work.role)
+    check("错误提示", dialog._status.text() == "账号或密码错误", dialog._status.text())
+
+    dialog._admin_user_edit.setText(DEFAULT_ADMIN_USER)
+    dialog._admin_pass_edit.setText(DEFAULT_ADMIN_PASS)
+    dialog._login_admin()
+    check("登录成功写回管理员", app.config.work.role == "admin", app.config.work.role)
+    check("登录后工作服务是管理员", app.work_service.is_admin(), str(app.work_service.is_admin()))
+    check("登录后工作页出现底层编辑按钮", app.work_panel._admin_button is not None, "")
+    check(
+        "登录提示是已解锁",
+        dialog._status.text() == "已登录管理者模式，工作模块已解锁",
+        dialog._status.text(),
+    )
+
+    dialog._logout_admin()
+    check("退出后回到员工身份", app.config.work.role == "user", app.config.work.role)
     check(
         "点评开关默认关、文案是「宠物点评工作结果」",
         dialog._comment_check.isChecked() is False
@@ -265,7 +295,7 @@ def main() -> int:
     check("图片宽度写回配置", app.config.vision.max_width == 1280, str(app.config.vision.max_width))
     check("宠物名写回配置", app.config.pet.name == "小团", app.config.pet.name)
     check("性格写回配置", app.config.pet.persona == "傲娇", app.config.pet.persona)
-    check("身份切换写回配置", app.config.work.role == "user", app.config.work.role)
+    check("退出管理者后的身份写回配置", app.config.work.role == "user", app.config.work.role)
     check("点评开关写回配置", app.config.work.pet_comment is True, str(app.config.work.pet_comment))
     check("陪玩页的 Key 存进了凭据管理器（已拦住，只做记录）", written == [("llm_dashscope", "sk-测试用")], str(written))
 
@@ -273,7 +303,7 @@ def main() -> int:
     reloaded = Config.load(box.config_path)
     check("存盘后重新读出来还是新值", reloaded.vision.model == "glm-4v-plus", reloaded.vision.model)
     check("宠物名也存住了", reloaded.pet.name == "小团", reloaded.pet.name)
-    check("身份（调试用）也存住了", reloaded.work.role == "user", reloaded.work.role)
+    check("退出管理者状态也存住了", reloaded.work.role == "user", reloaded.work.role)
     check("点评开关也存住了", reloaded.work.pet_comment is True, str(reloaded.work.pet_comment))
     dialog.close()
 

@@ -56,9 +56,6 @@ from life.screen.focus_timer import is_focus_proc
 
 import ui.settings as settings_mod
 
-# 公开版：菜单里工作模块那一项写的是锁着的说法（ui/pet_window.py / ui/tray.py）
-LOCKED_WORK = "🔒 工作模块（待解锁）"
-
 ROOT = Path(__file__).resolve().parents[1]
 
 
@@ -245,14 +242,14 @@ def main() -> int:
     section("③ 右键菜单只有四条：工作 / 生活 / 设置 / 退出（不随状态增减）")
     texts = _menu_texts(pet)
     check("桌宠右键菜单正好四条",
-          [t for t in texts if t] == [LOCKED_WORK, "生活", "设置", "退出"], str(texts))
+          [t for t in texts if t] == ["工作", "生活", "设置", "退出"], str(texts))
     check("专注进行中也不多冒「结束专注」「番茄钟」",
           "结束专注" not in texts and "番茄钟" not in texts, str(texts))
     # 托盘菜单是**每次弹出前**重排的（aboutToShow），所以这里模拟一次"用户点开托盘菜单"。
     app.tray._menu.aboutToShow.emit()
     tray_texts = [a.text() for a in app.tray._menu.actions()]
     check("托盘菜单同款：显示/隐藏 + 四条（没有专注那两条）",
-          [t for t in tray_texts if t] == ["隐藏桌宠", LOCKED_WORK, "生活", "设置", "退出"],
+          [t for t in tray_texts if t] == ["隐藏桌宠", "工作", "生活", "设置", "退出"],
           str(tray_texts))
 
     # 专注进行中，菜单**还是**四条——这才是"不随状态增减"
@@ -260,7 +257,7 @@ def main() -> int:
     pump(0.05)
     busy_texts = _menu_texts(pet)
     check("专注跑着的时候，菜单仍是那四条",
-          [t for t in busy_texts if t] == [LOCKED_WORK, "生活", "设置", "退出"], str(busy_texts))
+          [t for t in busy_texts if t] == ["工作", "生活", "设置", "退出"], str(busy_texts))
     app.handle_action("focus")     # 程序化出口（界面上改在番茄钟面板，见下面那一节）
     pump(0.05)
     check("程序化「结束专注」→ 归空闲", not focus.running and not focus.in_progress,

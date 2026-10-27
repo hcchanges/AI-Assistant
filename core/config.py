@@ -23,7 +23,7 @@ from typing import Any
 import keyring
 import yaml
 
-from core.paths import app_path, bundle_dir
+from core.paths import app_path, bundle_dir, is_frozen
 
 logger = logging.getLogger(__name__)
 
@@ -227,9 +227,9 @@ class WorkSection:
     """
 
     provider: str = "tongyi"    # 联网检索用哪家（llm.providers 里的键）
-    top_n: int = 5              # 工作卡片输出几条
+    top_n: int = 5              # 卖点预测输出几条
     pet_comment: bool = False   # 结果末尾让宠物点评一句（带性格腔调；默认关，在设置页打开）
-    role: str = WORK_ROLE_ADMIN  # 工作模块按哪种身份显示：管理员 / 员工（调试用）
+    role: str = WORK_ROLE_USER   # 工作模块按哪种身份显示：默认员工，设置页登录管理者后变 admin
 
 
 @dataclass
@@ -1054,6 +1054,20 @@ class Config:
 
     @property
     def log_dir(self) -> Path:
+        """日志落点：打包态固定在 **exe 旁边的 data/logs**，开发态照旧 data_dir/logs。
+
+        打包后 `ROOT_DIR` 是 PyInstaller 的 `_internal`（只读资源根），原来 pet.log
+        落在 `_internal/data/logs/`——用户站在 exe 旁边怎么翻都找不到（本轮真机
+        实测"今天 0 日志"就是找错了地方）。日志是排障的入口，必须放在人找得到的
+        地方：没显式配 `app.data_dir` 时，冻结态一律落到
+        `<exe 所在目录>/data/logs/pet.log`，跟开发态的 `<项目根>/data/logs/` 同构。
+        显式配了 `data_dir` 的用户（外置数据根 / 多盘）照旧按配置走，不动他们的选择。
+        """
+        if is_frozen() and not (self.app.data_dir or "").strip():
+            text = str(self.app.log_dir or "logs").replace("\\", "/")
+            if text.startswith("data/"):
+                text = text[len("data/"):]
+            return app_path("data") / text
         return self.data_path(self.app.log_dir)
 
     # ---------- 运行期数据归置（v2-data-root） ----------
